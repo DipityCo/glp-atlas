@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launch frame, painted by the system before the app has anything on screen. From Android
+  12 the splash screen is always shown, so the choice is only what colour it is.
+
+  #1E2242 is the top of the sky. It matches the sky-top custom property in the stylesheet and
+  SKY in MainActivity; changing one means changing all three.
+
+  WryActivity is an AppCompatActivity, so the parent must stay in the AppCompat family.
+-->
+<resources>
+    <style name="Theme.Atlas" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">#1E2242</item>
+        <item name="android:windowSplashScreenBackground">#1E2242</item>
+    </style>
+</resources>

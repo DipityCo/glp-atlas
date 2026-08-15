@@ -1,0 +1,15 @@
+/target
+/app/target
+
+# Dioxus / cargo-mobile2 generated Android project + build output
+/app/gen
+/app/dist
+/app/jniLibs
+/app/.dioxus
+*.apk
+
+# Codegraph
+/.codegraph
+
+# OS / editor
+.DS_Store

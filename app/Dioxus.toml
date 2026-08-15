@@ -1,0 +1,20 @@
+[application]
+name = "glp-atlas"
+# Replaces dx's generated activity. Copied verbatim, not templated.
+android_main_activity = "android/MainActivity.kt"
+
+[bundle]
+identifier = "co.dipity.glpatlas"
+publisher = "GLP Atlas"
+
+[android]
+# minSdk 31 for a WebView modern enough to composite the star field. target/compile 36
+# avoids the "built for an older version of Android" install warning.
+min_sdk = 31
+target_sdk = 36
+compile_sdk = 36
+
+[android.application]
+# WryActivity is an AppCompatActivity, so the theme must stay in the AppCompat family. The
+# dark variant gives the launch frame a dark window background.
+theme = "@style/Theme.AppCompat.NoActionBar"

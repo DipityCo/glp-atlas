@@ -1,0 +1,57 @@
+[package]
+name = "glp-atlas"
+version = "0.1.0"
+edition = "2021"
+description = "GLP Atlas: a GLP-1 dose and progress tracker"
+license = "AGPL-3.0-or-later"
+
+[lints.clippy]
+all = "warn"
+cargo = "warn"
+complexity = "warn"
+correctness = "warn"
+pedantic = "warn"
+perf = "warn"
+style = "warn"
+suspicious = "warn"
+cargo_common_metadata = { level = "allow", priority = 127 }
+collapsible_if = { level = "allow", priority = 127 }
+multiple_crate_versions = { level = "allow", priority = 127 }
+needless_continue = { level = "allow", priority = 127 }
+str_to_string = { level = "deny", priority = 127 }
+uninlined-format-args = { level = "allow", priority = 127 }
+
+[lints.rust]
+let_underscore_drop = { level = "deny", priority = 127 }
+non_ascii_idents = { level = "deny", priority = 127 }
+
+[dependencies]
+dioxus = "0.7"
+
+# The UI touches no platform APIs, so the same code runs in a browser. `dx serve
+# --platform web` is the fast loop for working on the star field; Android is the target.
+[features]
+default = ["mobile"]
+mobile = ["dioxus/mobile"]
+web = ["dioxus/web"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+log = "0.4"
+android_logger = "0.14"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"  # dioxus/wry assume unwinding
+
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+
+[profile.server-dev]
+inherits = "dev"
+
+[profile.android-dev]
+inherits = "dev"

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Launcher icon foreground: one bright star with a diffraction cross, the mark the app's
+    own field draws on its brightest few, with fainter companions around it. Everything sits
+    inside the middle 72dp safe zone.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Diffraction cross: four tapered spikes meeting at the star. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillAlpha="0.92"
+        android:pathData="M54,26 L57.2,50.8 L54,54 L50.8,50.8 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillAlpha="0.92"
+        android:pathData="M54,82 L50.8,57.2 L54,54 L57.2,57.2 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillAlpha="0.92"
+        android:pathData="M26,54 L50.8,50.8 L54,54 L50.8,57.2 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillAlpha="0.92"
+        android:pathData="M82,54 L57.2,57.2 L54,54 L57.2,50.8 Z" />
+    <!-- Core, with a halo standing in for the glow the app gives its brightest stars. -->
+    <path
+        android:fillColor="#FFC9D6FF"
+        android:fillAlpha="0.34"
+        android:pathData="M54,44 a10,10 0 1,0 0.1,0 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,49 a5,5 0 1,0 0.1,0 Z" />
+    <!-- Companions. -->
+    <path
+        android:fillColor="#FFDFE6FF"
+        android:fillAlpha="0.85"
+        android:pathData="M76,36 a2.6,2.6 0 1,0 0.1,0 Z" />
+    <path
+        android:fillColor="#FFFFE6CF"
+        android:fillAlpha="0.75"
+        android:pathData="M34,70 a2.1,2.1 0 1,0 0.1,0 Z" />
+    <path
+        android:fillColor="#FFDFE6FF"
+        android:fillAlpha="0.6"
+        android:pathData="M72,72 a1.7,1.7 0 1,0 0.1,0 Z" />
+</vector>
