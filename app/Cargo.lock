@@ -2185,6 +2185,7 @@ dependencies = [
  "android_logger",
  "chrono",
  "dioxus",
+ "futures-util",
  "log",
  "serde",
  "serde_json",

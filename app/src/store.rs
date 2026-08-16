@@ -9,6 +9,7 @@ use std::cmp::{Ordering, Reverse};
 use chrono::{Days, Local, NaiveDate, NaiveTime, Weekday};
 use dioxus::document;
 use dioxus::prelude::*;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::formulary::Drug;
@@ -34,13 +35,21 @@ try {
 }
 "#;
 
-/// Writes the document back. The payload arrives over the channel rather than baked into this
-/// source, so a note carrying quotes or newlines cannot end up as script.
+/// Writes documents back, one at a time, for as long as the app runs. The payload arrives over
+/// the channel rather than baked into this source, so a note carrying quotes or newlines cannot
+/// end up as script.
 const WRITE: &str = r#"
-const raw = await dioxus.recv();
-try {
-  localStorage.setItem("atlas.v1", raw);
-} catch (error) {}
+while (true) {
+  let raw;
+  try {
+    raw = await dioxus.recv();
+  } catch (error) {
+    break;
+  }
+  try {
+    localStorage.setItem("atlas.v1", raw);
+  } catch (error) {}
+}
 "#;
 
 /// Where the records stand with the device's storage.
@@ -484,7 +493,7 @@ impl Store {
 
     /// Silent unless the stored log has been read: an empty starting log must not land on top of
     /// one, and a log this build cannot parse must not be replaced by one it can.
-    fn persist(self) {
+    fn persist(self, writer: Coroutine<String>) {
         if self.status() != Status::Ready {
             return;
         }
@@ -497,7 +506,7 @@ impl Store {
         }) else {
             return;
         };
-        document::eval(WRITE).send(payload).ok();
+        writer.send(payload);
     }
 }
 
@@ -511,9 +520,20 @@ impl Default for Store {
 /// everything that reads it.
 pub fn use_store() -> Store {
     let store = use_context_provider(Store::new);
+
+    // One evaluator, fed in order, for the life of the app. An evaluator per write is a channel
+    // per write, and two of them can resolve out of order, which lets an older document land
+    // last: hold a key down in the titration form and the record can end a keystroke behind.
+    let writer = use_coroutine(|mut documents: UnboundedReceiver<String>| async move {
+        let eval = document::eval(WRITE);
+        while let Some(document) = documents.next().await {
+            eval.send(document).ok();
+        }
+    });
+
     use_hook(move || spawn(store.hydrate()));
     // Reads the log, so it runs again whenever the log changes.
-    use_effect(move || store.persist());
+    use_effect(move || store.persist(writer));
     store
 }
 
