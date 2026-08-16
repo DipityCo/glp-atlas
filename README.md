@@ -2,10 +2,13 @@
 
 A GLP-1 dose and progress tracker for Android, written in Rust with [Dioxus](https://dioxuslabs.com).
 
-**This is early.** What exists today is the navigation shell with sample numbers wired into
-it. There's no database yet, so nothing you enter sticks around. Local storage is the next
-piece of work. [ROADMAP.md](ROADMAP.md) lays out the plan, including the things this app
-will deliberately never do.
+**This is early.** Doses work end to end: you log them, edit them, delete them, and they're
+still there next time you open the app, stored on the device and nowhere else. Record which
+GLP-1 you're on and your titration plan, and the Doses page draws how much of the drug is
+still in you across the cycle, modelled from your own log. Progress is still the navigation
+shell with sample numbers wired into it, and the store is local storage rather than a real
+database. [ROADMAP.md](ROADMAP.md) lays out the plan, including the things this app will
+deliberately never do.
 
 ## The idea
 

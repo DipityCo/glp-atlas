@@ -399,7 +399,7 @@ mod tests {
         assert!(drift.contains("animation-duration:320s"), "{drift}");
     }
 
-    /// Reads a numeric value back out of a generated inline style.
+    // Reads a numeric value back out of a generated inline style.
     fn value(style: &str, key: &str) -> f32 {
         let start = style
             .find(key)

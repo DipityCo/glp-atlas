@@ -14,6 +14,12 @@ pub const STYLESHEET: &str = r#"
   --accent: #9fc0ff;
   --accent-deep: #6f92e0;
   --warm: #f2c48d;
+  /* One tint per drug. Checked against the card behind them for lightness, chroma, contrast, and
+     for telling any two apart under protanopia, deuteranopia and tritanopia. Changing one means
+     checking the set again. */
+  --tint-semaglutide: #5b8ae8;
+  --tint-tirzepatide: #c4832f;
+  --tint-retatrutide: #d4569b;
   --line: rgba(196, 204, 255, 0.14);
   --line-strong: rgba(196, 204, 255, 0.26);
   /* Opaque enough to hold --ink-faint above 4.5:1 over the bright end of the sky. */
@@ -483,6 +489,142 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Modelled medication level: the figures on the left, the moment they are read at on the right.
+   `last baseline` where it is understood, and the bottom edge where it is not. */
+.level-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+  align-items: flex-end;
+  align-items: last baseline;
+}
+.level-value {
+  font-size: 1.5rem;
+  font-weight: 640;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+/* Pushed to the far edge, so it reads as the whole block's rather than as another column of the
+   row it happens to sit on. */
+.level-when {
+  margin: 0;
+  margin-left: auto;
+  text-align: right;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* With more than one curve the readout is also the legend: a swatch and a name against every
+   figure, so which line is which is never carried by colour alone. */
+.level-list { display: flex; flex-direction: column; gap: 0.375rem; margin: 0.125rem 0 0; }
+.level-row { display: flex; align-items: baseline; gap: 0.5rem; }
+.level-swatch {
+  flex: none;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 999px;
+  background: currentColor;
+  transform: translateY(-0.0625rem);
+}
+.level-of { flex: 1; font-size: 0.875rem; color: var(--ink-soft); }
+.level-at { font-size: 1.0625rem; font-weight: 620; font-variant-numeric: tabular-nums; }
+
+/* Takes the keyboard on behalf of the drawing. No border of its own: the focus ring is the only
+   thing that should say it is here. */
+.plot-frame { border-radius: var(--radius); }
+.plot-frame:focus { outline: none; }
+.plot-frame:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* Shown on focus, so a phone never draws it. */
+.plot-keys {
+  display: none;
+  margin-top: 0.5rem;
+  font-size: 0.6875rem;
+  color: var(--ink-faint);
+}
+.plot-frame:focus-visible .plot-keys { display: block; }
+
+/* Scales with the column; the viewBox fixes its proportions. `pan-y` leaves the page its
+   vertical scroll and hands plot.js everything across and every pinch. An SVG under a mouse is
+   otherwise draggable as an image, and the selection that starts instead swallows every move
+   after the first. */
+.plot {
+  display: block;
+  width: 100%;
+  height: auto;
+  /* The chart is drawn further than it shows. The curve is clipped to the window; this is what
+     keeps the date labels either side of it off the cards above and below. */
+  overflow: hidden;
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+/* Catches touches over the whole chart, including the empty parts. */
+.plot-surface { fill: transparent; }
+/* Each curve sits in a group that sets `color` to its drug's tint, so no rule here names one. */
+.plot-area { fill: currentColor; opacity: 0.14; }
+/* A pinch scales the layer horizontally, which would drag the stroke widths with it. */
+.plot-line, .plot-ahead, .plot-dose, .plot-now, .plot-cursor { vector-effect: non-scaling-stroke; }
+.plot-line, .plot-ahead {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* Past now the curve is projected, not something that happened. */
+.plot-ahead { stroke-dasharray: 3 4.5; opacity: 0.5; }
+.plot-base { stroke: var(--line-strong); stroke-width: 1; }
+.plot-rule { stroke: var(--line); stroke-width: 1; }
+.plot-settles { fill: rgba(242, 196, 141, 0.10); }
+.plot-now { stroke: rgba(255, 255, 255, 0.30); stroke-width: 1; }
+/* The cursor belongs to no curve: it marks the moment being read, not a value. */
+.plot-cursor { stroke: var(--warm); stroke-width: 1.5; }
+/* Where each curve crosses it. The ring is the card's colour, so two picks that land together
+   do not read as one mark. */
+.plot-pick { fill: currentColor; stroke: #2b2f4f; stroke-width: 2; }
+.plot-dose { stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.plot-label {
+  fill: var(--ink-faint);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.step { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4375rem; padding: 0.375rem 0; }
+.step + .step { box-shadow: inset 0 1px 0 var(--line); }
+.step-figure {
+  flex: 1;
+  min-width: 3.25rem;
+  min-height: var(--tap);
+  padding: 0.5rem 0.625rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(22, 25, 50, 0.34);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9375rem;
+  font-variant-numeric: tabular-nums;
+}
+.step-figure:focus { outline: none; border-color: rgba(159, 192, 255, 0.55); }
+.step-unit { font-size: 0.78rem; color: var(--ink-faint); flex: none; }
+.step-drop {
+  width: var(--tap);
+  height: var(--tap);
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.step-drop:active { background: rgba(255, 255, 255, 0.07); }
+
 .chips { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .chip {
   display: inline-flex;
@@ -501,6 +643,10 @@ body {
   background: rgba(159, 192, 255, 0.18);
   color: var(--ink);
 }
+
+/* Two fields on one line, wrapping to their own where the column is too narrow. */
+.pair { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.pair .field { flex: 1; min-width: 8.5rem; }
 
 .field { display: flex; flex-direction: column; gap: 0.4375rem; }
 .field label { font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
@@ -542,9 +688,19 @@ body {
   font-weight: 640;
   box-shadow: 0 12px 28px rgba(111, 146, 224, 0.32);
 }
+/* Armed for a destructive tap. */
+.btn.warn {
+  border-color: rgba(242, 196, 141, 0.45);
+  background: rgba(242, 196, 141, 0.16);
+  color: var(--warm);
+}
 .btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: 0.45; box-shadow: none; cursor: default; }
+.btn:disabled:active { transform: none; }
 
 .note { margin: 0; font-size: 0.8rem; line-height: 1.55; color: var(--ink-faint); }
+/* For a note about what the app knows less well than the rest. */
+.note.caution { color: var(--warm); }
 
 /* Drawn in pseudo-elements so the button can be a full-size target without the track
    growing to match. */

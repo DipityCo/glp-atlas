@@ -1,98 +1,571 @@
-//! The Doses page and the two sub-pages reached from it.
+//! The Doses page and the pages reached from it.
+//!
+//! Everything here reads and writes the one dose log in [`crate::store`]; nothing on these
+//! screens is a fixed figure.
 
-use crate::icons::{CalendarClock, Syringe};
+use std::cmp::Ordering;
+
+use chrono::NaiveDate;
+use dioxus::document;
 use dioxus::prelude::*;
 
 use super::Row;
+use crate::chart::{self, Moved, PLOT};
+use crate::formulary::Drug;
+use crate::icons::{CalendarClock, Pill, Syringe};
+use crate::kinetics::{curve, instant_of, moment, on_board, spent, Given, Kinetics, Sample, TRACE};
 use crate::nav::{Nav, SubPage};
+use crate::store::{
+    clock, format_mg, format_time, parse_mg, parse_time, rung, suggest_site, today, Cycle, Dose,
+    DoseId, Draft, Medication, Site, Status, Store, TitrationStep,
+};
 
-/// A logged injection.
-struct Dose {
-    weekday: &'static str,
-    date: &'static str,
-    strength: &'static str,
-    site: &'static str,
-    note: &'static str,
+/// Weekday, day and month: `Thursday 6 Aug`.
+fn long_date(date: NaiveDate) -> String {
+    date.format("%A %-d %b").to_string()
 }
 
-static RECENT: [Dose; 4] = [
-    Dose {
-        weekday: "Thursday",
-        date: "6 Aug",
-        strength: "2.5 mg",
-        site: "Left abdomen",
-        note: "Mild nausea the following morning, settled by noon.",
-    },
-    Dose {
-        weekday: "Thursday",
-        date: "30 Jul",
-        strength: "2.5 mg",
-        site: "Right thigh",
-        note: "No side effects.",
-    },
-    Dose {
-        weekday: "Thursday",
-        date: "23 Jul",
-        strength: "1.7 mg",
-        site: "Right abdomen",
-        note: "Last week at the previous strength.",
-    },
-    Dose {
-        weekday: "Friday",
-        date: "17 Jul",
-        strength: "1.7 mg",
-        site: "Left thigh",
-        note: "A day late, travelling.",
-    },
-];
+/// Day and month: `6 Aug`. For the chart's readout, which has no room for a weekday.
+fn short_date(date: NaiveDate) -> String {
+    date.format("%-d %b").to_string()
+}
 
-/// Injection sites offered when logging a dose.
-static SITES: [&str; 4] = ["Left abdomen", "Right abdomen", "Left thigh", "Right thigh"];
+/// A date as it reads in a list: named for the last two days, dated before that.
+fn day_label(date: NaiveDate, today: NaiveDate) -> String {
+    match (today - date).num_days() {
+        0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        _ => long_date(date),
+    }
+}
 
-/// Days elapsed in the current seven-day cycle. Fills the countdown ring.
-const DAYS_ELAPSED: u32 = 5;
-const _: () = assert!(
-    DAYS_ELAPSED <= 7,
-    "the ring renders `7 - DAYS_ELAPSED`, which underflows past the end of the cycle"
-);
+fn strength_change(from: u32, to: u32) -> String {
+    match to.cmp(&from) {
+        Ordering::Greater => format!("+{} mg", format_mg(to - from)),
+        Ordering::Less => format!("−{} mg", format_mg(from - to)),
+        Ordering::Equal => "Same".to_owned(),
+    }
+}
 
 #[component]
-pub fn DosesPage() -> Element {
-    let mut nav = use_context::<Nav>();
-    let fill = DAYS_ELAPSED * 100 / 7;
+fn MissingDose() -> Element {
+    rsx! {
+        div { class: "card",
+            h2 { class: "card-title", "Dose not found" }
+            p { class: "note", "This dose is no longer in the log." }
+        }
+    }
+}
+
+#[component]
+fn CycleCard(last: Dose, today: NaiveDate, interval: u32) -> Element {
+    let strength = format_mg(last.micrograms);
+    let Some(cycle) = Cycle::new(last.taken, today, interval) else {
+        return rsx! {
+            div { class: "card hero",
+                div { class: "hero-main",
+                    span { class: "hero-value",
+                        "{strength}"
+                        span { class: "hero-unit", "mg" }
+                    }
+                    span { class: "hero-label", "Logged {long_date(last.taken)}" }
+                }
+            }
+        };
+    };
+    let (count, caption) = cycle.ring();
+    let label = match cycle.remaining {
+        0 => "Next dose today".to_owned(),
+        days if days < 0 => format!("Was due {}", long_date(cycle.due)),
+        _ => format!("Next dose {}", long_date(cycle.due)),
+    };
     rsx! {
         div { class: "card hero",
-            div { class: "ring", style: "--p:{fill}",
+            div { class: "ring", style: "--p:{cycle.fill()}",
                 div { class: "ring-inner",
-                    span { class: "ring-num", "{7 - DAYS_ELAPSED}" }
-                    span { class: "ring-cap", "days" }
+                    span { class: "ring-num", "{count}" }
+                    span { class: "ring-cap", "{caption}" }
                 }
             }
             div { class: "hero-main",
                 span { class: "hero-value",
-                    "2.5"
+                    "{strength}"
                     span { class: "hero-unit", "mg" }
                 }
-                span { class: "hero-label", "Next dose Thursday, 13 Aug" }
+                span { class: "hero-label", "{label}" }
+            }
+        }
+    }
+}
+
+/// The chart's canvas, in the units its `viewBox` declares. The stylesheet stretches it to the
+/// column, so these are proportions rather than pixels.
+const CHART_WIDTH: f64 = 320.0;
+const CHART_HEIGHT: f64 = 150.0;
+/// Points along the curve, per window's width. Enough that a peak is not visibly faceted at the
+/// closest zoom.
+const RESOLUTION: u32 = 240;
+/// Windows either side of the one on show that the curve is drawn across.
+///
+/// `plot.js` moves the drawing under the finger and only reports on release, so whatever a
+/// gesture brings in from an edge has to have been drawn before it began. One window each side
+/// covers a drag across the full width of the chart and a threefold pinch; past that the curve
+/// runs out until the finger lifts.
+const OVERSCAN: u32 = 1;
+/// Cycles a plan is carried forward for. Far enough to show a titration step arriving.
+const PROJECTED_CYCLES: u32 = 12;
+
+/// How much of the timeline the chart opens on: a month, which holds four weekly cycles.
+const OPENING_SPAN: f64 = 30.0;
+/// Where the timeline starts, as days from the first dose logged. A little before it, so the
+/// first injection has the curve rising out of it rather than standing on the left edge.
+const TIMELINE_OPENS: f64 = -2.0;
+/// The shortest the value axis will run to, in micrograms. Ten times the level a curve is
+/// followed down to, so a window past the end of a drug is ruled at figures that read as nothing.
+const AXIS_FLOOR: f64 = TRACE * 10.0;
+
+/// A modelled amount, in milligrams. Two decimals below a milligram and one above: the model
+/// does not support reading it any finer than that.
+fn format_level(micrograms: f64) -> String {
+    let mg = micrograms / 1000.0;
+    if mg >= 1.0 {
+        format!("{mg:.1}")
+    } else {
+        format!("{mg:.2}")
+    }
+}
+
+/// The doses the plan says are still to come, from the last one logged out to `horizon`.
+///
+/// Past the last rung the plan says nothing and the final strength is carried on as maintenance,
+/// which is the one thing projected here that the user did not enter.
+///
+/// Only ever ahead of `now`: a dose that was due and never logged did not happen, and drawing it
+/// would put a dose in the past that the log does not have.
+fn projected(
+    last: &Dose,
+    origin: NaiveDate,
+    interval: f64,
+    now: f64,
+    horizon: f64,
+    plan: &[TitrationStep],
+    started: Option<NaiveDate>,
+) -> Vec<Given> {
+    // Anchored on the last dose's own hour, so a plan keeps the time of day it is kept at.
+    let from = instant_of(last, origin);
+    let mut ahead = Vec::new();
+    let mut cycle = 1;
+    loop {
+        let day = from + interval * f64::from(cycle);
+        if day > horizon || ahead.len() >= 400 {
+            return ahead;
+        }
+        if day >= now {
+            // The plan decides the strength, so a step up shows before it is reached; past the
+            // end of the plan the last strength holds. Read at the date the dose falls inside
+            // rather than the midnight nearest it, so one given at midday takes that day's rung.
+            let strength = chart::instant_at(day, origin)
+                .map(|at| at.date())
+                .zip(started)
+                .and_then(|(date, started)| rung(plan, started, date))
+                .map_or(last.micrograms, |rung| rung.micrograms);
+            ahead.push(Given {
+                day,
+                micrograms: strength,
+            });
+        }
+        cycle += 1;
+    }
+}
+
+/// How much of the drug is still in the body, over the log behind and the plan ahead.
+#[component]
+#[allow(clippy::needless_pass_by_value)]
+fn LevelCard(doses: Vec<Dose>, medication: Medication) -> Element {
+    // Unset until a gesture moves it. Fitted to the timeline below rather than on arrival, so the
+    // one piece of code that decides what a window may be runs on every path into it.
+    let mut window = use_signal(|| None::<(f64, f64)>);
+    // Where the chart is being read, as the tap landed rather than as it is shown: how fine a
+    // reading is worth quoting depends on the zoom, which the tap does not fix. Unset means now.
+    let mut reading = use_signal(|| None::<f64>);
+
+    use_hook(move || {
+        spawn(async move {
+            let mut gestures = document::eval(PLOT);
+            while let Ok(moved) = gestures.recv::<Moved>().await {
+                window.set(Some((moved.from, moved.to)));
+                if let Some(day) = moved.read.filter(|day| day.is_finite()) {
+                    reading.set(Some(day));
+                }
+            }
+        });
+    });
+
+    // The oldest dose is day zero of the axis; everything else is measured from it.
+    let Some(first) = doses.last() else {
+        return rsx! {};
+    };
+
+    let origin = first.taken;
+    let now = moment(origin);
+
+    // The log is newest first, so the first match is the latest dose of that drug.
+    let latest = |drug: Drug| doses.iter().find(|dose| dose.drug == Some(drug));
+
+    // In the formulary's order rather than the order they were first taken, so an order taken
+    // from the log cannot repaint one curve because a different one was logged.
+    let taking: Vec<Drug> = Drug::ALL
+        .into_iter()
+        .filter(|drug| latest(*drug).is_some())
+        .collect();
+    // The drug the figures beside the chart describe: the one the medication record names, where
+    // it has been logged. A record naming a drug never injected has nothing to project from and
+    // settles nowhere, so it would describe a curve that is not on the chart.
+    let Some(leading) = medication
+        .drug
+        .filter(|drug| latest(*drug).is_some())
+        .or_else(|| taking.first().copied())
+    else {
+        return rsx! {};
+    };
+
+    // From the formulary rather than the medication record, since the record describes the drug
+    // it names and that is not always the drug being drawn.
+    let interval = f64::from(leading.interval_days().max(1));
+
+    // The plan is the medication record's own drug's and reads across to no other.
+    let prescribed = medication.drug == Some(leading);
+    let plan: &[TitrationStep] = if prescribed {
+        &medication.titration
+    } else {
+        &[]
+    };
+    let started = prescribed
+        .then_some(medication.started)
+        .flatten()
+        .or(Some(first.taken));
+
+    // The furthest anything is carried: a dozen cycles past the last injection, or past now where
+    // the log has been left alone for longer than that.
+    let cap = doses
+        .first()
+        .map_or(now, |dose| instant_of(dose, origin))
+        .max(now)
+        + interval * f64::from(PROJECTED_CYCLES);
+
+    // Every drug's own doses, with the one under a plan carried forward on it.
+    //
+    // A dose having been given is no evidence that another will be, so without a plan every curve
+    // washes out. Projected to the cap rather than to the horizon below, since the chart samples
+    // a window either side of the one on show and the overscan would otherwise fall away for want
+    // of doses the plan says are coming.
+    let carried: Vec<(Drug, Kinetics, Vec<Given>)> = taking
+        .iter()
+        .map(|&drug| {
+            let mut given = Given::from_log(&doses, origin, drug);
+            if drug == leading && !plan.is_empty() {
+                if let Some(last) = latest(drug) {
+                    given.extend(projected(last, origin, interval, now, cap, plan, started));
+                }
+            }
+            (drug, Kinetics::of(drug), given)
+        })
+        .collect();
+
+    // The timeline runs out where the last of the drugs does, rather than at a fixed count of
+    // cycles, since a curve not carried forward decays to nothing long before the cap. Every drug
+    // is asked, not just the leading one, which may be outlived by the drug it replaced. Never
+    // short of a cycle past now, so the dose next due always has somewhere to be drawn.
+    let horizon = carried
+        .iter()
+        .map(|(_, kinetics, given)| {
+            let last = given
+                .iter()
+                .map(|dose| dose.day)
+                .fold(f64::NEG_INFINITY, f64::max);
+            spent(*kinetics, given, last, cap)
+        })
+        .fold(now + interval, f64::max);
+
+    // The timeline the window slides along. Refused past what a calendar holds, which is a dose
+    // dated by a typo.
+    let Some(closes) = chart::whole_day(horizon) else {
+        return rsx! {};
+    };
+    let bounds = (TIMELINE_OPENS, closes);
+
+    let (from, to) = chart::fit(
+        window().unwrap_or((now - OPENING_SPAN / 2.0, now + OPENING_SPAN / 2.0)),
+        bounds,
+    );
+    let span = to - from;
+
+    // How fine the chart will speak at this zoom, and the reading rounded onto it. Snapped here
+    // rather than where the tap arrives, so zooming in on a reading sharpens it.
+    let grain = chart::grain(span);
+    let cursor = reading()
+        .map_or(now, |day| chart::snapped(day, grain))
+        .clamp(bounds.0, bounds.1);
+
+    let margin = span * f64::from(OVERSCAN);
+
+    let drawn: Vec<(Drug, Kinetics, Vec<Given>, Vec<Sample>)> = carried
+        .into_iter()
+        .map(|(drug, kinetics, given)| {
+            let samples = curve(
+                kinetics,
+                &given,
+                from - margin,
+                to + margin,
+                RESOLUTION * (1 + 2 * OVERSCAN),
+            );
+            (drug, kinetics, given, samples)
+        })
+        .collect();
+
+    // Across every curve, and to the window alone: fitting the axis to the overscan too would
+    // scale the chart to a peak nobody can see, and change it as the window slid past one.
+    let peak = drawn
+        .iter()
+        .flat_map(|(_, _, _, samples)| samples)
+        .filter(|sample| sample.day >= from && sample.day <= to)
+        .map(|sample| sample.micrograms)
+        .fold(0.0_f64, f64::max);
+
+    // A lone curve gets the band under it and a figure above it; two of either say less than one.
+    let alone = drawn.len() == 1;
+
+    // The leading drug's model and doses, taken from what was already built rather than rebuilt:
+    // `Kinetics::of` solves for an absorption rate by halving an interval a hundred times.
+    let front = drawn.iter().find(|(drug, ..)| *drug == leading);
+
+    // Where the current strength settles, read at the two ends of a cycle: the trough just before
+    // the next dose, and the peak at the drug's own time to peak after one.
+    let settles = latest(leading)
+        .filter(|_| alone)
+        .zip(front)
+        .map(|(last, (_, kinetics, ..))| {
+            (
+                kinetics.at_steady_state(last.micrograms, interval, interval),
+                kinetics.peak_at_steady_state(last.micrograms, interval),
+            )
+        });
+
+    // A window past the end of the drug holds nothing, and an axis fitted to that alone would
+    // rule itself in micrograms.
+    let ceiling = settles
+        .map_or(peak, |(_, top)| peak.max(top))
+        .max(AXIS_FLOOR);
+    let Some(scale) = chart::Scale::new(from, to, ceiling * 1.15, CHART_WIDTH, CHART_HEIGHT) else {
+        return rsx! {};
+    };
+
+    // A reading inside the same grain as now is now: at a day's grain that is anywhere today, and
+    // at an hour's it is the hour the clock is in.
+    let is_now = reading().is_none() || (cursor - now).abs() <= grain / 2.0;
+
+    // How far up towards where this strength settles the level has come. A closure, since only
+    // one of the four ways the line below reads quotes it.
+    let settled_share = || {
+        let Some((last, (_, kinetics, given, _))) = latest(leading).zip(front) else {
+            return "now".to_owned();
+        };
+        let phase = (now - instant_of(last, origin)).clamp(0.0, interval);
+        let settled = kinetics.at_steady_state(last.micrograms, interval, phase);
+        let share = if settled > 0.0 {
+            (on_board(*kinetics, given, now) / settled * 100.0).clamp(0.0, 999.0)
+        } else {
+            0.0
+        };
+        format!(
+            "now · {share:.0}% of where {} mg settles",
+            format_mg(last.micrograms)
+        )
+    };
+
+    // The time of day only where the zoom earns it: at a day's grain a reading stands for the
+    // whole day, and an hour beside it would be a figure the user never picked.
+    let stamp = chart::instant_at(cursor, origin).map(|at| {
+        if grain < 1.0 {
+            format!("{} at {}", short_date(at.date()), at.format("%H:%M"))
+        } else {
+            short_date(at.date())
+        }
+    });
+    let when = match (stamp, is_now, alone) {
+        (None, ..) => "an unreadable date".to_owned(),
+        (_, true, true) => settled_share(),
+        (_, true, false) => "now".to_owned(),
+        (Some(stamp), false, _) if cursor > now => format!("projected for {stamp}"),
+        (Some(stamp), false, _) => stamp,
+    };
+
+    // Only doses that were really given: a tick says an injection happened, which is not
+    // something a plan can claim. Last, so the samples can be taken rather than copied.
+    let series: Vec<chart::Series> = drawn
+        .into_iter()
+        .map(|(drug, kinetics, given, samples)| chart::Series {
+            drug,
+            samples,
+            marks: doses
+                .iter()
+                .filter(|dose| dose.drug == Some(drug))
+                .map(|dose| instant_of(dose, origin))
+                .filter(|day| *day >= from - margin && *day <= to + margin)
+                .collect(),
+            pick: on_board(kinetics, &given, cursor),
+        })
+        .collect();
+
+    rsx! {
+        div { class: "card tight",
+            h2 { class: "card-title", "Medication in circulation" }
+            div { class: "level-head",
+                // One drug reads as a figure; several read as a list, which doubles as the legend
+                // so that identity is never carried by colour alone.
+                if let (true, Some(only)) = (alone, series.first()) {
+                    span { class: "level-value",
+                        "{format_level(only.pick)}"
+                        span { class: "hero-unit", "mg" }
+                    }
+                } else {
+                    div { class: "level-list",
+                        for drawn in series.iter() {
+                            div {
+                                key: "{drawn.drug:?}",
+                                class: "level-row",
+                                style: "color: var({drawn.drug.tint()})",
+                                span { class: "level-swatch" }
+                                span { class: "level-of", "{drawn.drug.label()}" }
+                                span { class: "level-at", "{format_level(drawn.pick)} mg" }
+                            }
+                        }
+                    }
+                }
+                // At the far edge: the moment all the figures are read at, and beside any one of
+                // them it would read as that one's.
+                p { class: "level-when", "{when}" }
+            }
+
+            chart::LevelPlot {
+                series,
+                origin,
+                scale,
+                now,
+                bounds,
+                settles,
+                cursor: Some(cursor),
+                // Returning to now drops the reading with it, or the readout would name a day
+                // that is no longer on screen.
+                onnudge: move |nudge: chart::Nudge| {
+                    if nudge == chart::Nudge::Now {
+                        reading.set(None);
+                    }
+                    window.set(Some(nudge.from((from, to), now)));
+                },
+            }
+
+        }
+    }
+}
+
+#[component]
+fn DoseRow(dose: Dose, today: NaiveDate) -> Element {
+    let title = match dose.time {
+        Some(time) => format!("{} at {}", day_label(dose.taken, today), format_time(time)),
+        None => day_label(dose.taken, today),
+    };
+    // A log can span more than one drug, so the row says which. A dose with none is in no curve,
+    // and this is where that is noticed.
+    let sub = match dose.drug {
+        Some(drug) => format!("{} · {}", drug.label(), dose.site.label()),
+        None => format!("No drug set · {}", dose.site.label()),
+    };
+    rsx! {
+        Row {
+            icon: rsx! { Syringe { size: 20 } },
+            title: "{title}",
+            sub: "{sub}",
+            meta: "{format_mg(dose.micrograms)} mg",
+            target: SubPage::DoseDetail(dose.id),
+        }
+    }
+}
+
+#[component]
+pub fn DosesPage() -> Element {
+    let mut nav = use_context::<Nav>();
+    let store = use_context::<Store>();
+    let log = store.all();
+    let today = today();
+    let medication = store.medication();
+    let interval = medication.interval_days();
+
+    // The plan is dated from the day the user gave it, or from the first dose if they gave none.
+    let started = medication
+        .started
+        .or_else(|| log.last().map(|dose| dose.taken));
+    let step = started.and_then(|started| rung(&medication.titration, started, today));
+    let schedule = match (medication.drug, step) {
+        (Some(drug), Some(step)) => format!(
+            "{} · {} mg, week {} of {}",
+            drug.label(),
+            format_mg(step.micrograms),
+            step.week,
+            step.weeks
+        ),
+        (Some(drug), None) if medication.titration.is_empty() => {
+            format!("{}, no plan entered", drug.label())
+        }
+        (Some(drug), None) => format!("{} · past the end of the plan", drug.label()),
+        (None, _) => "Not set up yet".to_owned(),
+    };
+
+    rsx! {
+        if let Some(last) = log.first() {
+            CycleCard { last: last.clone(), today, interval }
+        } else {
+            div { class: "card",
+                h2 { class: "card-title", "Nothing logged yet" }
+                p { class: "note",
+                    "Log an injection and Atlas counts the cycle from it, here and on every page after."
+                }
+            }
+        }
+
+        if !log.is_empty() {
+            if medication.drug.is_some() || log.iter().any(|dose| dose.drug.is_some()) {
+                LevelCard { doses: log.clone(), medication: medication.clone() }
+            } else {
+                div { class: "card flush",
+                    Row {
+                        icon: rsx! { Pill { size: 20 } },
+                        title: "Medication level",
+                        sub: "Needs to know which drug you take",
+                        target: SubPage::Medication,
+                    }
+                }
             }
         }
 
         button {
             class: "btn primary block",
             onclick: move |_| nav.push(SubPage::LogDose),
-            "Log this week's dose"
+            if log.is_empty() { "Log your first dose" } else { "Log a dose" }
         }
 
-        div { class: "card tight",
-            h2 { class: "card-title", "Recent" }
-            div { class: "card flush",
-                for (index , dose) in RECENT.iter().enumerate() {
-                    Row {
-                        icon: rsx! { Syringe { size: 20 } },
-                        title: "{dose.weekday} {dose.date}",
-                        sub: "{dose.site}",
-                        meta: "{dose.strength}",
-                        target: SubPage::DoseDetail(index),
+        if store.status() == Status::Unreadable {
+            p { class: "note",
+                "This device is not letting Atlas store anything, so what you log here will last only until the app closes."
+            }
+        }
+
+        if !log.is_empty() {
+            div { class: "card tight",
+                h2 { class: "card-title", "History" }
+                div { class: "card flush",
+                    for dose in log.iter() {
+                        DoseRow { key: "{dose.id:?}", dose: dose.clone(), today }
                     }
                 }
             }
@@ -102,7 +575,7 @@ pub fn DosesPage() -> Element {
             Row {
                 icon: rsx! { CalendarClock { size: 20 } },
                 title: "Titration schedule",
-                sub: "2.5 mg for 3 more weeks",
+                sub: "{schedule}",
                 target: SubPage::Medication,
             }
         }
@@ -110,88 +583,312 @@ pub fn DosesPage() -> Element {
 }
 
 #[component]
-pub fn DoseDetailPage(index: usize) -> Element {
-    let Some(dose) = RECENT.get(index) else {
-        return rsx! {
-            div { class: "card",
-                h2 { class: "card-title", "Dose not found" }
-                p { class: "note", "This dose is no longer in the log." }
-            }
-        };
+pub fn DoseDetailPage(id: DoseId) -> Element {
+    let mut nav = use_context::<Nav>();
+    let mut store = use_context::<Store>();
+    // Deleting is two taps rather than a dialog: a dialog in the WebView would freeze the page
+    // it is drawn over, and this record cannot be recovered.
+    let mut arming = use_signal(|| false);
+
+    let Some(dose) = store.get(id) else {
+        return rsx! { MissingDose {} };
     };
+    let previous = store.previous(id);
+    let number = store.number(id).unwrap_or(1);
+    let gap = previous.as_ref().map_or_else(
+        || "—".to_owned(),
+        |earlier| format!("{} d", (dose.taken - earlier.taken).num_days()),
+    );
+    // Only against the same drug: 2.5 mg of one to 5 mg of another is not a step up in dose.
+    let change = previous
+        .as_ref()
+        .filter(|earlier| earlier.drug == dose.drug)
+        .map_or_else(
+            || "—".to_owned(),
+            |earlier| strength_change(earlier.micrograms, dose.micrograms),
+        );
+    let when = match dose.time {
+        Some(time) => format!("{} at {}", long_date(dose.taken), format_time(time)),
+        None => format!("{}, no time recorded", long_date(dose.taken)),
+    };
+    let what = match dose.drug {
+        Some(drug) => drug.label().to_owned(),
+        None => "No drug set".to_owned(),
+    };
+
     rsx! {
         div { class: "card hero",
             div { class: "hero-main",
                 span { class: "hero-value",
-                    "{dose.strength}"
+                    "{format_mg(dose.micrograms)}"
+                    span { class: "hero-unit", "mg" }
                 }
-                span { class: "hero-label", "{dose.weekday} {dose.date} · {dose.site}" }
+                span { class: "hero-label", "{what} · {when} · {dose.site.label()}" }
             }
         }
-        div { class: "card",
-            h2 { class: "card-title", "Notes" }
-            p { class: "note", "{dose.note}" }
-        }
-        div { class: "card",
-            h2 { class: "card-title", "Around this dose" }
+
+        div { class: "card tight",
+            h2 { class: "card-title", "Against the log" }
             div { class: "stats",
                 div { class: "stat",
-                    span { class: "stat-value", "213.8" }
-                    span { class: "stat-label", "Weight" }
+                    span { class: "stat-value", "#{number}" }
+                    span { class: "stat-label", "Dose" }
                 }
                 div { class: "stat",
-                    span { class: "stat-value", "7 d" }
+                    span { class: "stat-value", "{gap}" }
                     span { class: "stat-label", "Since last" }
                 }
                 div { class: "stat",
-                    span { class: "stat-value", "Mild" }
-                    span { class: "stat-label", "Side effects" }
+                    span { class: "stat-value", "{change}" }
+                    span { class: "stat-label", "Strength" }
                 }
             }
         }
-        button { class: "btn block", "Edit this dose" }
+
+        if !dose.note.is_empty() {
+            div { class: "card",
+                h2 { class: "card-title", "Notes" }
+                p { class: "note", "{dose.note}" }
+            }
+        }
+
+        button {
+            class: "btn block",
+            onclick: move |_| nav.push(SubPage::EditDose(id)),
+            "Edit this dose"
+        }
+        button {
+            class: if arming() { "btn block warn" } else { "btn block" },
+            onclick: move |_| {
+                if arming() {
+                    store.remove(id);
+                    nav.back();
+                } else {
+                    arming.set(true);
+                }
+            },
+            if arming() { "Tap again to delete" } else { "Delete this dose" }
+        }
     }
 }
 
 #[component]
 pub fn LogDosePage() -> Element {
+    rsx! {
+        DoseForm {}
+    }
+}
+
+#[component]
+pub fn EditDosePage(id: DoseId) -> Element {
+    let store = use_context::<Store>();
+    if store.get(id).is_none() {
+        return rsx! { MissingDose {} };
+    }
+    rsx! {
+        DoseForm { id }
+    }
+}
+
+/// The form behind both logging and editing. `id` names the dose being rewritten; without one
+/// the form adds a dose to the log. Nothing is saved until the button is pressed.
+#[component]
+fn DoseForm(id: Option<DoseId>) -> Element {
     let mut nav = use_context::<Nav>();
-    let mut chosen = use_signal(|| 1usize);
+    let mut store = use_context::<Store>();
+
+    let log = store.all();
+    let existing = id.and_then(|id| store.get(id));
+
+    // A new dose opens on now, since one is nearly always logged just after it was given.
+    // Editing opens on what was recorded, and on no hour at all where none was.
+    let default_date = existing.as_ref().map_or_else(today, |dose| dose.taken);
+    let default_time = existing
+        .as_ref()
+        .map_or_else(|| Some(clock()), |dose| dose.time);
+    // The one field carried over from the last dose: a strength holds week to week and a date
+    // does not.
+    let default_strength = existing
+        .as_ref()
+        .or_else(|| log.first())
+        .map(|dose| format_mg(dose.micrograms));
+    let default_site = existing
+        .as_ref()
+        .map_or_else(|| suggest_site(&log), |dose| dose.site);
+    // A new dose opens on the drug being taken; editing opens on what was recorded, including on
+    // nothing.
+    let default_drug = existing.as_ref().map_or_else(
+        || {
+            store
+                .medication()
+                .drug
+                .or_else(|| log.first().and_then(|dose| dose.drug))
+        },
+        |dose| dose.drug,
+    );
+    let default_note = existing.map_or_else(String::new, |dose| dose.note);
+
+    let mut date = use_signal(move || default_date.format("%Y-%m-%d").to_string());
+    let mut time = use_signal(move || default_time.map(format_time).unwrap_or_default());
+    let mut strength = use_signal(move || default_strength.unwrap_or_default());
+    let mut site = use_signal(move || default_site);
+    let mut drug = use_signal(move || default_drug);
+    let mut note = use_signal(move || default_note);
+
+    let taken = NaiveDate::parse_from_str(&date(), "%Y-%m-%d").ok();
+    let hour = parse_time(&time());
+    let micrograms = parse_mg(&strength());
+    let mistyped = micrograms.is_none() && !strength().trim().is_empty();
+    let ready = taken.is_some() && micrograms.is_some();
+
     rsx! {
         div { class: "card",
-            div { class: "field",
-                label { r#for: "dose-date", "Date" }
-                input { id: "dose-date", r#type: "date", value: "2026-08-13" }
-            }
-            div { class: "field",
-                label { r#for: "dose-strength", "Strength" }
-                input { id: "dose-strength", r#type: "text", value: "2.5 mg" }
-            }
-        }
-        div { class: "card tight",
-            h2 { class: "card-title", "Injection site" }
-            div { class: "chips",
-                for (index , site) in SITES.iter().enumerate() {
-                    button {
-                        class: if index == chosen() { "chip on" } else { "chip" },
-                        aria_pressed: "{index == chosen()}",
-                        onclick: move |_| chosen.set(index),
-                        "{site}"
+            div { class: "pair",
+                div { class: "field",
+                    label { r#for: "dose-date", "Date" }
+                    input {
+                        id: "dose-date",
+                        r#type: "date",
+                        value: "{date}",
+                        oninput: move |event| date.set(event.value()),
+                    }
+                }
+                div { class: "field",
+                    label { r#for: "dose-time", "Time" }
+                    input {
+                        id: "dose-time",
+                        r#type: "time",
+                        value: "{time}",
+                        oninput: move |event| time.set(event.value()),
                     }
                 }
             }
-            p { class: "note", "Atlas suggests rotating away from the last two sites." }
+            if hour.is_none() {
+                p { class: "note",
+                    "Without a time the level curve places this dose at midday."
+                }
+            }
+            div { class: "field",
+                label { r#for: "dose-strength", "Strength in mg" }
+                input {
+                    id: "dose-strength",
+                    r#type: "text",
+                    inputmode: "decimal",
+                    placeholder: "2.5",
+                    value: "{strength}",
+                    oninput: move |event| strength.set(event.value()),
+                }
+                if mistyped {
+                    p { class: "note", "A strength is a number of milligrams, such as 2.5." }
+                }
+            }
         }
+
+        div { class: "card tight",
+            h2 { class: "card-title", "Drug" }
+            div { class: "chips",
+                for option in Drug::ALL {
+                    button {
+                        class: if drug() == Some(option) { "chip on" } else { "chip" },
+                        aria_pressed: "{drug() == Some(option)}",
+                        // Tapping the chosen drug again unsets it: the only way back to a dose
+                        // with no drug on it.
+                        onclick: move |_| drug.set((drug() != Some(option)).then_some(option)),
+                        "{option.label()}"
+                    }
+                }
+            }
+            if drug().is_none() {
+                p { class: "note",
+                    "Without a drug this dose stays in the log and out of the level curve: nothing can be modelled without knowing which molecule it was."
+                }
+            }
+        }
+
+        div { class: "card tight",
+            h2 { class: "card-title", "Injection site" }
+            div { class: "chips",
+                for option in Site::ALL {
+                    button {
+                        class: if option == site() { "chip on" } else { "chip" },
+                        aria_pressed: "{option == site()}",
+                        onclick: move |_| site.set(option),
+                        "{option.label()}"
+                    }
+                }
+            }
+            if !log.is_empty() {
+                p { class: "note", "Atlas opens on the site you have gone longest without using." }
+            }
+        }
+
         div { class: "card",
             div { class: "field",
                 label { r#for: "dose-notes", "Notes" }
-                textarea { id: "dose-notes", rows: "3", placeholder: "How did it go?" }
+                textarea {
+                    id: "dose-notes",
+                    rows: "3",
+                    placeholder: "How did it go?",
+                    value: "{note}",
+                    oninput: move |event| note.set(event.value()),
+                }
             }
         }
+
         button {
             class: "btn primary block",
-            onclick: move |_| nav.back(),
-            "Save dose"
+            disabled: !ready,
+            onclick: move |_| {
+                let (Some(taken), Some(micrograms)) = (taken, micrograms) else {
+                    return;
+                };
+                let draft = Draft {
+                    taken,
+                    time: hour,
+                    drug: drug(),
+                    micrograms,
+                    site: site(),
+                    note: note().trim().to_owned(),
+                };
+                match id {
+                    Some(id) => store.update(id, draft),
+                    None => {
+                        store.add(draft);
+                    }
+                }
+                nav.back();
+            },
+            if id.is_some() { "Save changes" } else { "Save dose" }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn date(text: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(text, "%Y-%m-%d").expect("a date the test wrote")
+    }
+
+    #[test]
+    fn the_last_two_days_are_named_and_everything_older_is_dated() {
+        let today = date("2026-08-14");
+        assert_eq!(day_label(today, today), "Today");
+        assert_eq!(day_label(date("2026-08-13"), today), "Yesterday");
+        assert_eq!(day_label(date("2026-08-06"), today), "Thursday 6 Aug");
+    }
+
+    #[test]
+    fn a_date_ahead_of_today_is_dated_rather_than_named() {
+        let today = date("2026-08-14");
+        assert_eq!(day_label(date("2026-08-15"), today), "Saturday 15 Aug");
+    }
+
+    #[test]
+    fn a_step_between_strengths_carries_its_direction() {
+        assert_eq!(strength_change(1700, 2500), "+0.8 mg");
+        assert_eq!(strength_change(2500, 1700), "−0.8 mg");
+        assert_eq!(strength_change(2500, 2500), "Same");
     }
 }

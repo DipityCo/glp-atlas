@@ -6,6 +6,7 @@
 //
 // Sets `transform` on the plane elements directly. Writing `--pan` on their shared ancestor
 // would invalidate style for every star beneath it.
+
 // A re-evaluation binds a fresh `dioxus` channel, leaving the previous listeners sending into
 // a dead one. Tearing the old install down first keeps exactly one live set.
 if (window.__atlasSwipeCleanup) window.__atlasSwipeCleanup();
@@ -31,6 +32,8 @@ const RESISTANCE = 0.3;
 const CONTENT_FOLLOW = 0.35;
 /** Outlasts the plane transition, after which the stylesheet resolves to the same place. */
 const SETTLE_MS = 1300;
+/** Controls that own their horizontal drag. A swipe starting inside one never pans the field. */
+const OPT_OUT = "[data-swipe='off']";
 
 const number = (el, property) =>
   parseFloat(getComputedStyle(el).getPropertyValue(property)) || 0;
@@ -60,15 +63,30 @@ const release = () => {
   if (shell) shell.style.transform = "";
 };
 
-const start = (event) => {
-  if (event.touches.length !== 1) return;
+/**
+ * By where the gesture fell rather than by what it hit: an SVG only answers where it is painted,
+ * and the chart is mostly not.
+ */
+const optedOut = (point) =>
+  [...app.querySelectorAll(OPT_OUT)].some((el) => {
+    const box = el.getBoundingClientRect();
+    return (
+      point.clientX >= box.left &&
+      point.clientX <= box.right &&
+      point.clientY >= box.top &&
+      point.clientY <= box.bottom
+    );
+  });
+
+const start = (point) => {
+  origin = null;
+  if (optedOut(point)) return;
   if (settle) {
     clearTimeout(settle);
     settle = null;
     release();
   }
-  const touch = event.touches[0];
-  origin = { x: touch.clientX, y: touch.clientY };
+  origin = { x: point.clientX, y: point.clientY };
   axis = null;
   travel = 0;
   basePan = number(app, "--pan");
@@ -82,11 +100,10 @@ const start = (event) => {
   }));
 };
 
-const move = (event) => {
-  if (!origin || event.touches.length !== 1) return;
-  const touch = event.touches[0];
-  const dx = touch.clientX - origin.x;
-  const dy = touch.clientY - origin.y;
+const move = (point) => {
+  if (!origin) return;
+  const dx = point.clientX - origin.x;
+  const dy = point.clientY - origin.y;
 
   if (axis === null) {
     if (Math.abs(dx) > SLOP && Math.abs(dx) > Math.abs(dy) * BIAS) axis = "x";
@@ -134,16 +151,58 @@ const end = () => {
   dioxus.send(crossed > 0 ? 1 : -1);
 };
 
-app.addEventListener("touchstart", start, { passive: true });
-app.addEventListener("touchmove", move, { passive: true });
+// Touch and mouse rather than pointer events: touch is what carries this on a phone, and the
+// mouse half is what lets `make web` drive the same thing in a browser.
+//
+// A touch fires compatibility mouse events after itself. `touching` keeps those from being read
+// as a second gesture.
+let touching = false;
+let mousing = false;
+
+const touchStart = (event) => {
+  touching = true;
+  if (event.touches.length !== 1) {
+    origin = null;
+    return;
+  }
+  start(event.touches[0]);
+};
+const touchMove = (event) => {
+  if (event.touches.length === 1) move(event.touches[0]);
+};
+
+const mouseStart = (event) => {
+  if (touching || event.button !== 0) return;
+  mousing = true;
+  start(event);
+};
+const mouseMove = (event) => {
+  if (mousing) move(event);
+};
+const mouseEnd = () => {
+  if (!mousing) return;
+  mousing = false;
+  end();
+};
+
+app.addEventListener("touchstart", touchStart, { passive: true });
+app.addEventListener("touchmove", touchMove, { passive: true });
 app.addEventListener("touchend", end, { passive: true });
 app.addEventListener("touchcancel", end, { passive: true });
+app.addEventListener("mousedown", mouseStart, { passive: true });
+app.addEventListener("mousemove", mouseMove, { passive: true });
+app.addEventListener("mouseup", mouseEnd, { passive: true });
 
 window.__atlasSwipeCleanup = () => {
-  app.removeEventListener("touchstart", start);
-  app.removeEventListener("touchmove", move);
+  app.removeEventListener("touchstart", touchStart);
+  app.removeEventListener("touchmove", touchMove);
   app.removeEventListener("touchend", end);
   app.removeEventListener("touchcancel", end);
+  app.removeEventListener("mousedown", mouseStart);
+  app.removeEventListener("mousemove", mouseMove);
+  app.removeEventListener("mouseup", mouseEnd);
+  touching = false;
+  mousing = false;
   if (settle) clearTimeout(settle);
   release();
   app.classList.remove("dragging");
