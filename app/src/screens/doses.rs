@@ -16,8 +16,8 @@ use crate::icons::{CalendarClock, Pill, Syringe};
 use crate::kinetics::{curve, instant_of, moment, on_board, spent, Given, Kinetics, Sample, TRACE};
 use crate::nav::{Nav, SubPage};
 use crate::store::{
-    clock, format_mg, format_time, parse_mg, parse_time, rung, suggest_site, today, Cycle, Dose,
-    DoseId, Draft, Medication, Site, Status, Store, TitrationStep,
+    format_mg, format_time, parse_mg, parse_time, rung, suggest_site, time_of_day, time_value,
+    today, Clock, Cycle, Dose, DoseId, Draft, Medication, Site, Status, Store, TitrationStep,
 };
 
 /// Weekday, day and month: `Thursday 6 Aug`.
@@ -181,7 +181,7 @@ fn projected(
 /// How much of the drug is still in the body, over the log behind and the plan ahead.
 #[component]
 #[allow(clippy::needless_pass_by_value)]
-fn LevelCard(doses: Vec<Dose>, medication: Medication) -> Element {
+fn LevelCard(doses: Vec<Dose>, medication: Medication, clock: Clock) -> Element {
     // Unset until a gesture moves it. Fitted to the timeline below rather than on arrival, so the
     // one piece of code that decides what a window may be runs on every path into it.
     let mut window = use_signal(|| None::<(f64, f64)>);
@@ -387,7 +387,7 @@ fn LevelCard(doses: Vec<Dose>, medication: Medication) -> Element {
     // whole day, and an hour beside it would be a figure the user never picked.
     let stamp = chart::instant_at(cursor, origin).map(|at| {
         if grain < 1.0 {
-            format!("{} at {}", short_date(at.date()), at.format("%H:%M"))
+            format!("{} at {}", short_date(at.date()), at.format(clock.face()))
         } else {
             short_date(at.date())
         }
@@ -455,6 +455,7 @@ fn LevelCard(doses: Vec<Dose>, medication: Medication) -> Element {
                 bounds,
                 settles,
                 cursor: Some(cursor),
+                clock,
                 // Returning to now drops the reading with it, or the readout would name a day
                 // that is no longer on screen.
                 onnudge: move |nudge: chart::Nudge| {
@@ -470,9 +471,13 @@ fn LevelCard(doses: Vec<Dose>, medication: Medication) -> Element {
 }
 
 #[component]
-fn DoseRow(dose: Dose, today: NaiveDate) -> Element {
+fn DoseRow(dose: Dose, today: NaiveDate, clock: Clock) -> Element {
     let title = match dose.time {
-        Some(time) => format!("{} at {}", day_label(dose.taken, today), format_time(time)),
+        Some(time) => format!(
+            "{} at {}",
+            day_label(dose.taken, today),
+            format_time(time, clock)
+        ),
         None => day_label(dose.taken, today),
     };
     // A log can span more than one drug, so the row says which. A dose with none is in no curve,
@@ -499,6 +504,7 @@ pub fn DosesPage() -> Element {
     let log = store.all();
     let today = today();
     let medication = store.medication();
+    let clock = store.clock();
     let interval = medication.interval_days();
 
     // The plan is dated from the day the user gave it, or from the first dose if they gave none.
@@ -537,7 +543,7 @@ pub fn DosesPage() -> Element {
         // that no dose carries leaves nothing to draw, and gating on it would hide this row too.
         if !log.is_empty() {
             if log.iter().any(|dose| dose.drug.is_some()) {
-                LevelCard { doses: log.clone(), medication: medication.clone() }
+                LevelCard { doses: log.clone(), medication: medication.clone(), clock }
             } else {
                 div { class: "card flush",
                     Row {
@@ -571,7 +577,7 @@ pub fn DosesPage() -> Element {
                 h2 { class: "card-title", "History" }
                 div { class: "card flush",
                     for dose in log.iter() {
-                        DoseRow { key: "{dose.id:?}", dose: dose.clone(), today }
+                        DoseRow { key: "{dose.id:?}", dose: dose.clone(), today, clock }
                     }
                 }
             }
@@ -614,7 +620,11 @@ pub fn DoseDetailPage(id: DoseId) -> Element {
             |earlier| strength_change(earlier.micrograms, dose.micrograms),
         );
     let when = match dose.time {
-        Some(time) => format!("{} at {}", long_date(dose.taken), format_time(time)),
+        Some(time) => format!(
+            "{} at {}",
+            long_date(dose.taken),
+            format_time(time, store.clock())
+        ),
         None => format!("{}, no time recorded", long_date(dose.taken)),
     };
     let what = match dose.drug {
@@ -711,7 +721,7 @@ fn DoseForm(id: Option<DoseId>) -> Element {
     let default_date = existing.as_ref().map_or_else(today, |dose| dose.taken);
     let default_time = existing
         .as_ref()
-        .map_or_else(|| Some(clock()), |dose| dose.time);
+        .map_or_else(|| Some(time_of_day()), |dose| dose.time);
     // The one field carried over from the last dose: a strength holds week to week and a date
     // does not.
     let default_strength = existing
@@ -735,7 +745,9 @@ fn DoseForm(id: Option<DoseId>) -> Element {
     let default_note = existing.map_or_else(String::new, |dose| dose.note);
 
     let mut date = use_signal(move || default_date.format("%Y-%m-%d").to_string());
-    let mut time = use_signal(move || default_time.map(format_time).unwrap_or_default());
+    // The clock setting stops here: the control both reports and expects 24-hour whatever face the
+    // platform draws it with.
+    let mut time = use_signal(move || default_time.map(time_value).unwrap_or_default());
     let mut strength = use_signal(move || default_strength.unwrap_or_default());
     let mut site = use_signal(move || default_site);
     let mut drug = use_signal(move || default_drug);
