@@ -263,3 +263,22 @@ pub fn Check(size: u32) -> Element {
         }
     }
 }
+
+/// Two arms, with the brightest node where they cross rather than at any end.
+#[component]
+pub fn Cross(size: u32) -> Element {
+    rsx! {
+        Constellation {
+            size,
+            outline: rsx! {
+                path { d: "M6.5 6.5l11 11" }
+                path { d: "M17.5 6.5l-11 11" }
+            },
+            stars: rsx! {
+                circle { cx: "12", cy: "12", r: M1 }
+                circle { cx: "6.5", cy: "6.5", r: M3 }
+                circle { cx: "17.5", cy: "17.5", r: M4 }
+            },
+        }
+    }
+}

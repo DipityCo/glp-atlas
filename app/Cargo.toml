@@ -27,9 +27,13 @@ non_ascii_idents = { level = "deny", priority = 127 }
 
 [dependencies]
 dioxus = "0.7"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# For `StreamExt::next` on the channel behind `use_coroutine`, which dioxus re-exports the ends of
+# but not the trait to read them with. Already in the tree under dioxus.
+futures-util = { version = "0.3", default-features = false }
 
-# The UI touches no platform APIs, so the same code runs in a browser. `dx serve
-# --platform web` is the fast loop for working on the star field; Android is the target.
 [features]
 default = ["mobile"]
 mobile = ["dioxus/mobile"]
@@ -44,7 +48,7 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
-panic = "unwind"  # dioxus/wry assume unwinding
+panic = "unwind"
 
 [profile.wasm-dev]
 inherits = "dev"

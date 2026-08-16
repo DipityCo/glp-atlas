@@ -1,5 +1,8 @@
 //! The page bodies and the chrome that frames them: title bar, scrolling content column,
-//! and the persistent tab bar. Layout over fixed sample figures; there is no data layer.
+//! and the persistent tab bar.
+//!
+//! The Doses and Profile pages read and write [`crate::store`]. Progress is still layout over
+//! fixed sample figures.
 
 mod doses;
 mod profile;
@@ -105,8 +108,9 @@ pub fn Body() -> Element {
             Page::Progress => rsx! { progress::ProgressPage {} },
             Page::Profile => rsx! { profile::ProfilePage {} },
         },
-        Some(SubPage::DoseDetail(index)) => rsx! { doses::DoseDetailPage { index } },
+        Some(SubPage::DoseDetail(id)) => rsx! { doses::DoseDetailPage { id } },
         Some(SubPage::LogDose) => rsx! { doses::LogDosePage {} },
+        Some(SubPage::EditDose(id)) => rsx! { doses::EditDosePage { id } },
         Some(SubPage::LogWeight) => rsx! { progress::LogWeightPage {} },
         Some(SubPage::Measurements) => rsx! { progress::MeasurementsPage {} },
         Some(SubPage::Medication) => rsx! { profile::MedicationPage {} },

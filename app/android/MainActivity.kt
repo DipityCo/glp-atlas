@@ -107,5 +107,8 @@ class MainActivity : WryActivity() {
         this.webView = webView
         webView.setBackgroundColor(SKY)
         webView.settings.textZoom = (resources.configuration.fontScale * 100).toInt()
+        // The dose log lives in local storage, which WebView refuses by default: reading it
+        // throws rather than returning nothing, and the app reports itself unable to save.
+        webView.settings.domStorageEnabled = true
     }
 }

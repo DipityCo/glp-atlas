@@ -2,6 +2,8 @@
 
 use dioxus::prelude::*;
 
+use crate::store::DoseId;
+
 /// Top-level destinations, ordered left to right across the field.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -47,10 +49,14 @@ pub enum Direction {
 }
 
 /// A page stacked on top of a [`Page`].
+///
+/// The dose pages carry a [`DoseId`] rather than a position in the log, so a stack left standing
+/// while the log changes underneath it still names the dose it was opened on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SubPage {
-    DoseDetail(usize),
+    DoseDetail(DoseId),
     LogDose,
+    EditDose(DoseId),
     LogWeight,
     Measurements,
     Medication,
@@ -62,6 +68,7 @@ impl SubPage {
         match self {
             SubPage::DoseDetail(_) => "Dose",
             SubPage::LogDose => "Log a dose",
+            SubPage::EditDose(_) => "Edit dose",
             SubPage::LogWeight => "Log weight",
             SubPage::Measurements => "Measurements",
             SubPage::Medication => "Medication",
@@ -73,6 +80,7 @@ impl SubPage {
         match self {
             SubPage::DoseDetail(_) => "What was taken, and when",
             SubPage::LogDose => "Confirm the details",
+            SubPage::EditDose(_) => "Change what was logged",
             SubPage::LogWeight => "Today's reading",
             SubPage::Measurements => "Waist, chest, hips",
             SubPage::Medication => "Drug, strength, schedule",
@@ -241,7 +249,7 @@ impl Default for Nav {
 mod tests {
     use super::*;
 
-    /// Signals need a runtime and an owning scope; `Nav` is otherwise plain state.
+    // Signals need a runtime and an owning scope; `Nav` is otherwise plain state.
     fn nav(f: impl FnOnce(Nav)) {
         let dom = VirtualDom::new(|| rsx! { div {} });
         dom.in_runtime(|| {
@@ -469,13 +477,15 @@ mod tests {
     #[test]
     fn sub_pages_carrying_different_payloads_stack_separately() {
         nav(|mut nav| {
-            nav.push(SubPage::DoseDetail(0));
-            nav.push(SubPage::DoseDetail(3));
+            let first = DoseId::new(0);
+            let second = DoseId::new(3);
+            nav.push(SubPage::DoseDetail(first));
+            nav.push(SubPage::DoseDetail(second));
             assert_eq!(nav.depth(), 2);
-            assert_eq!(nav.top(), Some(SubPage::DoseDetail(3)));
+            assert_eq!(nav.top(), Some(SubPage::DoseDetail(second)));
 
             nav.back();
-            assert_eq!(nav.top(), Some(SubPage::DoseDetail(0)));
+            assert_eq!(nav.top(), Some(SubPage::DoseDetail(first)));
         });
     }
 }
