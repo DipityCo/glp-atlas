@@ -13,13 +13,10 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::formulary::Drug;
+use crate::stock::{stored, Stock, StockDraft, StockId, Vial, VialId};
 
 /// Days between doses when no drug has been chosen.
 const DEFAULT_INTERVAL_DAYS: u32 = 7;
-
-/// The largest strength that can be logged, in micrograms. Far past any GLP-1 dose; it is here
-/// so a mistyped figure cannot become a stored one.
-const MAX_MICROGRAMS: u32 = 1_000_000;
 
 /// Bumped when the stored shape changes. A stored document carrying any other version is left
 /// untouched rather than read, so a newer build's data survives an older one opening it.
@@ -127,6 +124,8 @@ pub struct Dose {
     /// tenth of a milligram is a real difference that a binary fraction does not hold exactly.
     pub micrograms: u32,
     pub site: Site,
+    #[serde(default)]
+    pub from: Option<VialId>,
     pub note: String,
 }
 
@@ -145,6 +144,7 @@ pub struct Draft {
     pub drug: Option<Drug>,
     pub micrograms: u32,
     pub site: Site,
+    pub from: Option<VialId>,
     pub note: String,
 }
 
@@ -270,6 +270,7 @@ pub fn rung(titration: &[TitrationStep], started: NaiveDate, today: NaiveDate) -
 struct Writing<'a> {
     version: u32,
     doses: &'a [Dose],
+    stock: Vec<stored::v1::Stock>,
     medication: &'a Medication,
     clock: Clock,
 }
@@ -281,6 +282,8 @@ struct Reading {
     version: u32,
     #[serde(default)]
     doses: Vec<Dose>,
+    #[serde(default)]
+    stock: Vec<stored::v1::Stock>,
     #[serde(default)]
     medication: Medication,
     #[serde(default)]
@@ -335,41 +338,6 @@ impl Cycle {
     }
 }
 
-/// Reads a strength in milligrams as typed, in micrograms. Rejects anything that is not a
-/// positive figure with at most three decimals. A trailing `mg` is accepted and ignored.
-pub fn parse_mg(text: &str) -> Option<u32> {
-    let text = text.trim().trim_end_matches("mg").trim();
-    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
-    let digits = |part: &str| part.chars().all(|c| c.is_ascii_digit());
-    if text.is_empty() || fraction.len() > 3 || !digits(whole) || !digits(fraction) {
-        return None;
-    }
-
-    let whole: u32 = if whole.is_empty() {
-        0
-    } else {
-        whole.parse().ok()?
-    };
-    let fraction: u32 = format!("{fraction:0<3}").parse().ok()?;
-    let micrograms = whole.checked_mul(1000)?.checked_add(fraction)?;
-    (1..=MAX_MICROGRAMS)
-        .contains(&micrograms)
-        .then_some(micrograms)
-}
-
-/// Milligrams, written back the way they were entered: no trailing zeros, no point when whole.
-pub fn format_mg(micrograms: u32) -> String {
-    let whole = micrograms / 1000;
-    let fraction = micrograms % 1000;
-    if fraction == 0 {
-        format!("{whole}")
-    } else {
-        format!("{whole}.{fraction:03}")
-            .trim_end_matches('0')
-            .to_owned()
-    }
-}
-
 /// How recently a site was used: 0 for the last dose, larger the longer ago, [`usize::MAX`] if
 /// it has never been used. `recent` is newest first.
 fn age(site: Site, recent: &[Dose]) -> usize {
@@ -406,23 +374,33 @@ fn newest_first(a: &Dose, b: &Dose) -> Ordering {
 pub struct Store {
     /// The log, kept newest first.
     doses: Signal<Vec<Dose>>,
+    stock: Signal<Vec<Stock>>,
     medication: Signal<Medication>,
     /// The face every time of day in the app is written on.
     clock: Signal<Clock>,
     status: Signal<Status>,
     /// Never reused within a session, so an id held by an open page cannot come to name a dose
-    /// logged after it. Not stored: nothing that holds one outlives a restart.
+    /// logged after it. Not stored: [`Store::install`] sets it past everything read back.
     next_id: Signal<u64>,
+    next_stock_id: Signal<u64>,
+    next_vial_id: Signal<u64>,
+}
+
+fn next_after(ids: impl Iterator<Item = u64>) -> u64 {
+    ids.max().map_or(0, |highest| highest.saturating_add(1))
 }
 
 impl Store {
     pub fn new() -> Self {
         Self {
             doses: Signal::new(Vec::new()),
+            stock: Signal::new(Vec::new()),
             medication: Signal::new(Medication::default()),
             clock: Signal::new(Clock::default()),
             status: Signal::new(Status::Loading),
             next_id: Signal::new(0),
+            next_stock_id: Signal::new(0),
+            next_vial_id: Signal::new(0),
         }
     }
 
@@ -463,6 +441,7 @@ impl Store {
             drug: draft.drug,
             micrograms: draft.micrograms,
             site: draft.site,
+            from: draft.from,
             note: draft.note,
         });
         doses.sort_by(newest_first);
@@ -480,12 +459,168 @@ impl Store {
         dose.drug = draft.drug;
         dose.micrograms = draft.micrograms;
         dose.site = draft.site;
+        dose.from = draft.from;
         dose.note = draft.note;
         doses.sort_by(newest_first);
     }
 
     pub fn remove(&mut self, id: DoseId) {
         self.doses.write().retain(|dose| dose.id != id);
+    }
+
+    pub fn stock(self) -> Vec<Stock> {
+        self.stock.read().clone()
+    }
+
+    pub fn stock_of(self, id: StockId) -> Option<Stock> {
+        self.stock
+            .read()
+            .iter()
+            .find(|entry| entry.id == id)
+            .cloned()
+    }
+
+    pub fn add_stock(&mut self, draft: StockDraft) -> StockId {
+        if let Some(id) = self.count_in(&draft) {
+            return id;
+        }
+        let id = StockId(*self.next_stock_id.read());
+        self.next_stock_id.set(id.0.saturating_add(1));
+        self.stock.write().insert(
+            0,
+            Stock {
+                id,
+                drug: draft.drug,
+                label: draft.label,
+                micrograms: draft.micrograms,
+                form: draft.form,
+                sealed: draft.sealed,
+                open: Vec::new(),
+                note: draft.note,
+            },
+        );
+        id
+    }
+
+    fn count_in(&mut self, draft: &StockDraft) -> Option<StockId> {
+        let mut stock = self.stock.write();
+        let entry = stock.iter_mut().find(|entry| entry.describes(draft))?;
+        entry.sealed = entry.sealed.saturating_add(draft.sealed);
+        if entry.note.trim().is_empty() {
+            entry.note.clone_from(&draft.note);
+        }
+        Some(entry.id)
+    }
+
+    /// Never merges, unlike [`Store::add_stock`]: an entry edited into another's description
+    /// stands beside it, since open pages hold the ids of the vials in use.
+    pub fn update_stock(&mut self, id: StockId, draft: StockDraft) {
+        let mut stock = self.stock.write();
+        let Some(entry) = stock.iter_mut().find(|entry| entry.id == id) else {
+            return;
+        };
+        entry.drug = draft.drug;
+        entry.label = draft.label;
+        entry.micrograms = draft.micrograms;
+        entry.form = draft.form;
+        entry.sealed = draft.sealed;
+        entry.note = draft.note;
+    }
+
+    pub fn open_vial(&mut self, id: StockId, microlitres: u32, on: NaiveDate) -> Option<VialId> {
+        let vial = VialId(*self.next_vial_id.read());
+        {
+            let mut stock = self.stock.write();
+            let entry = stock.iter_mut().find(|entry| entry.id == id)?;
+            if entry.sealed == 0 {
+                return None;
+            }
+            entry.sealed -= 1;
+            entry.open.push(Vial {
+                id: vial,
+                micrograms: entry.micrograms,
+                microlitres,
+                opened: on,
+            });
+        }
+        self.next_vial_id.set(vial.0.saturating_add(1));
+        Some(vial)
+    }
+
+    pub fn discard_vial(&mut self, id: StockId, vial: VialId) {
+        let mut discarded = false;
+        if let Some(entry) = self.stock.write().iter_mut().find(|entry| entry.id == id) {
+            let held = entry.open.len();
+            entry.open.retain(|open| open.id != vial);
+            discarded = entry.open.len() != held;
+        }
+        if discarded {
+            self.release(&[vial]);
+        }
+    }
+
+    pub fn remove_stock(&mut self, id: StockId) {
+        let mut gone = Vec::new();
+        self.stock.write().retain(|entry| {
+            if entry.id != id {
+                return true;
+            }
+            gone.extend(entry.open.iter().map(|vial| vial.id));
+            false
+        });
+        self.release(&gone);
+    }
+
+    fn release(&mut self, vials: &[VialId]) {
+        for dose in self.doses.write().iter_mut() {
+            if dose.from.is_some_and(|from| vials.contains(&from)) {
+                dose.from = None;
+            }
+        }
+    }
+
+    pub fn open_vials(self) -> Vec<(Stock, Vial)> {
+        self.stock
+            .read()
+            .iter()
+            .flat_map(|entry| entry.open.iter().map(|vial| (entry.clone(), vial.clone())))
+            .collect()
+    }
+
+    pub fn vial(self, id: VialId) -> Option<(Stock, Vial)> {
+        self.stock.read().iter().find_map(|entry| {
+            let vial = entry.open.iter().find(|open| open.id == id)?;
+            Some((entry.clone(), vial.clone()))
+        })
+    }
+
+    pub fn remaining(self, vial: &Vial) -> u32 {
+        let drawn = self
+            .doses
+            .read()
+            .iter()
+            .filter(|dose| dose.from == Some(vial.id))
+            .fold(0_u32, |sum, dose| sum.saturating_add(dose.micrograms));
+        vial.micrograms.saturating_sub(drawn)
+    }
+
+    pub fn held(self, entry: &Stock) -> u32 {
+        entry.open.iter().fold(
+            entry.sealed.saturating_mul(entry.micrograms),
+            |sum, vial| sum.saturating_add(self.remaining(vial)),
+        )
+    }
+
+    pub fn supply(self) -> (u32, u32) {
+        self.stock
+            .read()
+            .iter()
+            .fold((0, 0), |(sealed, open), entry| {
+                (
+                    sealed.saturating_add(entry.sealed),
+                    open.saturating_add(u32::try_from(entry.open.len()).unwrap_or(u32::MAX)),
+                )
+            })
     }
 
     pub fn medication(self) -> Medication {
@@ -517,7 +652,8 @@ impl Store {
                 raw: Some(raw),
             }) => match serde_json::from_str::<Reading>(&raw) {
                 Ok(reading) if reading.version == VERSION => {
-                    self.install(reading.doses);
+                    let stock = reading.stock.into_iter().map(Stock::from).collect();
+                    self.install(reading.doses, stock);
                     self.medication.set(reading.medication);
                     self.clock.set(reading.clock);
                     Status::Ready
@@ -529,16 +665,22 @@ impl Store {
         self.status.set(status);
     }
 
-    /// Puts a log read from the device in place, leaving the id counter past everything in it.
-    fn install(&mut self, mut doses: Vec<Dose>) {
+    /// Puts records read from the device in place, leaving every id counter past everything in
+    /// them.
+    fn install(&mut self, mut doses: Vec<Dose>, stock: Vec<Stock>) {
         doses.sort_by(newest_first);
-        let next = doses
-            .iter()
-            .map(|dose| dose.id.0)
-            .max()
-            .map_or(0, |highest| highest.saturating_add(1));
-        self.next_id.set(next);
+        self.next_id
+            .set(next_after(doses.iter().map(|dose| dose.id.0)));
+        self.next_stock_id
+            .set(next_after(stock.iter().map(|entry| entry.id.0)));
+        self.next_vial_id.set(next_after(
+            stock
+                .iter()
+                .flat_map(|entry| entry.open.iter())
+                .map(|vial| vial.id.0),
+        ));
         self.doses.set(doses);
+        self.stock.set(stock);
     }
 
     /// Silent unless the stored log has been read: an empty starting log must not land on top of
@@ -552,6 +694,7 @@ impl Store {
         let Ok(payload) = serde_json::to_string(&Writing {
             version: VERSION,
             doses: &doses,
+            stock: self.stock.read().iter().map(Into::into).collect(),
             medication: &medication,
             clock: *self.clock.read(),
         }) else {
@@ -591,6 +734,7 @@ pub fn use_store() -> Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stock::Form;
 
     fn date(text: &str) -> NaiveDate {
         NaiveDate::parse_from_str(text, "%Y-%m-%d").expect("a date the test wrote")
@@ -607,6 +751,7 @@ mod tests {
             drug: None,
             micrograms,
             site,
+            from: None,
             note: String::new(),
         }
     }
@@ -662,6 +807,7 @@ mod tests {
                 drug: None,
                 micrograms: 2500,
                 site: Site::LeftThigh,
+                from: None,
                 note: String::new(),
             });
 
@@ -692,6 +838,7 @@ mod tests {
                 drug: None,
                 micrograms: 2500,
                 site: Site::LeftThigh,
+                from: None,
                 note: String::new(),
             });
             let evening = store.add(Draft {
@@ -700,6 +847,7 @@ mod tests {
                 drug: None,
                 micrograms: 2500,
                 site: Site::RightThigh,
+                from: None,
                 note: String::new(),
             });
 
@@ -825,6 +973,7 @@ mod tests {
                 drug: None,
                 micrograms: 2500,
                 site: Site::LeftAbdomen,
+                from: None,
                 note: "Quotes \" and a\nnewline".to_owned(),
             });
             store.add(draft("2026-07-30", 1700, Site::RightThigh));
@@ -850,6 +999,7 @@ mod tests {
             let payload = serde_json::to_string(&Writing {
                 version: VERSION,
                 doses: &doses,
+                stock: Vec::new(),
                 medication: &medication,
                 clock: store.clock(),
             })
@@ -889,44 +1039,6 @@ mod tests {
         const KEY: &str = "\"atlas.v1\"";
         assert!(READ.contains(KEY), "the read script names another key");
         assert!(WRITE.contains(KEY), "the write script names another key");
-    }
-
-    #[test]
-    fn strengths_survive_being_written_and_read_back() {
-        for (text, micrograms) in [
-            ("2.5", 2500),
-            ("0.25", 250),
-            ("1", 1000),
-            ("15", 15_000),
-            ("1.7", 1700),
-            ("0.025", 25),
-        ] {
-            assert_eq!(parse_mg(text), Some(micrograms), "reading {text}");
-            assert_eq!(format_mg(micrograms), text, "writing {text} back");
-        }
-    }
-
-    #[test]
-    fn strengths_are_read_however_they_are_typed() {
-        assert_eq!(parse_mg(" 2.5 mg "), Some(2500));
-        assert_eq!(parse_mg("2.50"), Some(2500), "trailing zeros are harmless");
-        assert_eq!(parse_mg(".5"), Some(500));
-    }
-
-    #[test]
-    fn a_strength_that_is_not_a_dose_is_refused() {
-        for text in [
-            "", " ", "mg", "-1", "0", "0.0", "2.5.1", "2,5", "two", "2.0005", "1001", "1e3", "+2",
-        ] {
-            assert_eq!(parse_mg(text), None, "`{text}` is not a strength");
-        }
-    }
-
-    #[test]
-    fn the_largest_strength_is_accepted_and_anything_past_it_is_not() {
-        assert_eq!(parse_mg("1000"), Some(MAX_MICROGRAMS));
-        assert_eq!(parse_mg("1000.001"), None);
-        assert_eq!(parse_mg("4294968"), None, "past what micrograms can hold");
     }
 
     #[test]
@@ -1055,6 +1167,345 @@ mod tests {
             store.add(draft("2026-07-16", 2500, Site::RightAbdomen));
 
             assert_eq!(suggest_site(&store.all()), Site::LeftThigh);
+        });
+    }
+
+    fn vials(micrograms: u32, count: u32) -> StockDraft {
+        StockDraft {
+            drug: Some(Drug::Tirzepatide),
+            label: String::new(),
+            micrograms,
+            form: Form::Lyophilized,
+            sealed: count,
+            note: String::new(),
+        }
+    }
+
+    fn drawn(taken: &str, micrograms: u32, vial: VialId) -> Draft {
+        Draft {
+            from: Some(vial),
+            ..draft(taken, micrograms, Site::LeftThigh)
+        }
+    }
+
+    fn only(store: Store) -> Stock {
+        let shelf = store.stock();
+        assert_eq!(shelf.len(), 1, "the shelf holds one entry");
+        shelf.into_iter().next().expect("and it is that one")
+    }
+
+    #[test]
+    fn ten_of_one_vial_are_one_entry_counting_ten() {
+        store(|mut store| {
+            let first = store.add_stock(vials(30_000, 4));
+            let again = store.add_stock(vials(30_000, 6));
+
+            assert_eq!(again, first, "the second lot lands on the first entry");
+            assert_eq!(only(store).sealed, 10);
+            assert_eq!(store.supply(), (10, 0));
+        });
+    }
+
+    #[test]
+    fn vials_that_are_not_the_same_thing_stand_as_their_own_entries() {
+        store(|mut store| {
+            store.add_stock(vials(30_000, 1));
+
+            store.add_stock(vials(15_000, 1));
+            store.add_stock(StockDraft {
+                drug: Some(Drug::Semaglutide),
+                ..vials(30_000, 1)
+            });
+            store.add_stock(StockDraft {
+                label: "Batch B".to_owned(),
+                ..vials(30_000, 1)
+            });
+            store.add_stock(StockDraft {
+                form: Form::Solution { microlitres: 3000 },
+                ..vials(30_000, 1)
+            });
+
+            assert_eq!(
+                store.stock().len(),
+                5,
+                "a strength, a drug, a label and a form each tell two vials apart"
+            );
+        });
+    }
+
+    #[test]
+    fn a_label_written_in_another_case_is_the_same_label() {
+        store(|mut store| {
+            store.add_stock(StockDraft {
+                label: "Batch B".to_owned(),
+                ..vials(30_000, 1)
+            });
+            store.add_stock(StockDraft {
+                label: "  batch b ".to_owned(),
+                ..vials(30_000, 1)
+            });
+
+            assert_eq!(only(store).sealed, 2);
+        });
+    }
+
+    #[test]
+    fn mixing_a_vial_takes_it_out_of_the_count_and_puts_a_full_one_in_use() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 10));
+            let vial = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("a sealed vial is there to mix");
+
+            let entry = only(store);
+            assert_eq!(entry.sealed, 9, "the powder is one vial down");
+            assert_eq!(entry.open.len(), 1);
+
+            let mixed = &entry.open[0];
+            assert_eq!(mixed.id, vial);
+            assert_eq!(mixed.micrograms, 30_000, "it holds what the label said");
+            assert_eq!(mixed.microlitres, 2000);
+            assert_eq!(mixed.opened, date("2026-08-12"));
+            assert_eq!(store.remaining(mixed), 30_000, "and nothing is out of it");
+            assert_eq!(store.supply(), (9, 1));
+        });
+    }
+
+    #[test]
+    fn a_vial_cannot_be_mixed_out_of_an_empty_shelf() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 1));
+            store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("the one");
+
+            assert_eq!(store.open_vial(id, 2000, date("2026-08-19")), None);
+            assert_eq!(only(store).open.len(), 1, "nothing was mixed twice");
+        });
+    }
+
+    #[test]
+    fn a_vial_falls_only_by_the_doses_drawn_from_it() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 2));
+            let vial = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            let other = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+
+            store.add(drawn("2026-08-13", 2500, vial));
+            store.add(draft("2026-08-20", 2500, Site::LeftThigh));
+
+            let entry = only(store);
+            assert_eq!(store.remaining(&entry.open[0]), 27_500);
+            assert_eq!(
+                store.remaining(&entry.open[1]),
+                30_000,
+                "a dose naming no vial leaves every vial alone"
+            );
+            assert_eq!(entry.open[1].id, other);
+            assert_eq!(store.held(&entry), 27_500 + 30_000);
+        });
+    }
+
+    #[test]
+    fn deleting_a_dose_gives_the_drug_back_and_editing_one_reckons_it_afresh() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 1));
+            let vial = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            let dose = store.add(drawn("2026-08-13", 2500, vial));
+
+            let held = |store: Store| store.remaining(&only(store).open[0]);
+            assert_eq!(held(store), 27_500);
+
+            store.update(dose, drawn("2026-08-13", 5000, vial));
+            assert_eq!(held(store), 25_000, "the new strength is the one counted");
+
+            store.update(dose, draft("2026-08-13", 5000, Site::LeftThigh));
+            assert_eq!(held(store), 30_000, "unpicking the vial returns all of it");
+
+            store.update(dose, drawn("2026-08-13", 5000, vial));
+            store.remove(dose);
+            assert_eq!(held(store), 30_000, "and so does deleting the dose");
+        });
+    }
+
+    #[test]
+    fn drawing_past_what_a_vial_holds_leaves_it_empty_rather_than_owing() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 1));
+            let vial = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            store.add(drawn("2026-08-13", 25_000, vial));
+            store.add(drawn("2026-08-20", 25_000, vial));
+
+            let entry = only(store);
+            assert_eq!(store.remaining(&entry.open[0]), 0);
+            assert_eq!(store.held(&entry), 0);
+        });
+    }
+
+    #[test]
+    fn discarding_a_vial_leaves_the_doses_drawn_from_it_naming_nothing() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 1));
+            let vial = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            let dose = store.add(drawn("2026-08-13", 2500, vial));
+
+            store.discard_vial(id, vial);
+
+            assert!(only(store).open.is_empty());
+            let logged = store.get(dose).expect("the dose is still logged");
+            assert_eq!(logged.micrograms, 2500, "exactly as it was given");
+            assert_eq!(logged.from, None, "and pointing at no vial");
+            assert_eq!(store.vial(vial), None);
+        });
+    }
+
+    #[test]
+    fn discarding_against_the_wrong_entry_leaves_both_of_them_alone() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 1));
+            let other = store.add_stock(vials(15_000, 1));
+            let vial = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            let dose = store.add(drawn("2026-08-13", 2500, vial));
+
+            store.discard_vial(other, vial);
+
+            let entry = store.stock_of(id).expect("the entry still holds it");
+            assert_eq!(entry.open.len(), 1, "the vial is on the shelf it was on");
+            assert_eq!(
+                store.remaining(&entry.open[0]),
+                27_500,
+                "and still counts the dose drawn from it"
+            );
+            assert_eq!(store.get(dose).and_then(|dose| dose.from), Some(vial));
+        });
+    }
+
+    #[test]
+    fn deleting_an_entry_takes_the_vials_in_use_with_it() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 2));
+            let vial = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            let dose = store.add(drawn("2026-08-13", 2500, vial));
+
+            store.remove_stock(id);
+
+            assert!(store.stock().is_empty());
+            assert_eq!(store.supply(), (0, 0));
+            assert_eq!(store.get(dose).and_then(|dose| dose.from), None);
+        });
+    }
+
+    #[test]
+    fn editing_an_entry_leaves_the_vials_already_in_use_holding_what_they_did() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 3));
+            store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+
+            store.update_stock(id, vials(15_000, 1));
+
+            let entry = only(store);
+            assert_eq!(entry.micrograms, 15_000);
+            assert_eq!(entry.sealed, 1);
+            assert_eq!(
+                entry.open[0].micrograms, 30_000,
+                "a vial already mixed was made up at the old strength"
+            );
+        });
+    }
+
+    #[test]
+    fn a_stock_id_is_never_handed_out_twice() {
+        store(|mut store| {
+            let first = store.add_stock(vials(30_000, 1));
+            store.remove_stock(first);
+            let second = store.add_stock(vials(30_000, 1));
+
+            assert_ne!(first, second, "a deleted entry does not lend out its id");
+            assert_eq!(store.stock_of(first), None);
+        });
+    }
+
+    #[test]
+    fn a_stored_document_written_before_the_inventory_reads_with_an_empty_shelf() {
+        let payload = r#"{"version":1,"doses":[
+            {"id":0,"taken":"2026-08-06","micrograms":2500,"site":"LeftThigh","note":""}
+        ]}"#;
+        let read: Reading = serde_json::from_str(payload).expect("it still reads");
+
+        assert!(read.stock.is_empty());
+        assert_eq!(read.doses[0].from, None, "and no dose came out of a vial");
+    }
+
+    #[test]
+    fn the_shelf_and_the_vial_a_dose_came_from_survive_being_written_and_read_back() {
+        store(|mut store| {
+            let id = store.add_stock(StockDraft {
+                note: "Batch 42".to_owned(),
+                ..vials(30_000, 9)
+            });
+            let vial = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            store.add(drawn("2026-08-13", 2500, vial));
+            let doses = store.all();
+            let shelf = store.stock();
+
+            let payload = serde_json::to_string(&Writing {
+                version: VERSION,
+                doses: &doses,
+                stock: shelf.iter().map(Into::into).collect(),
+                medication: &store.medication(),
+                clock: store.clock(),
+            })
+            .expect("the document serialises");
+            let read: Reading = serde_json::from_str(&payload).expect("and reads back");
+
+            let back: Vec<Stock> = read.stock.into_iter().map(Stock::from).collect();
+            assert_eq!(back, shelf);
+            assert_eq!(read.doses, doses);
+            assert_eq!(read.doses[0].from, Some(vial));
+        });
+    }
+
+    #[test]
+    fn a_shelf_read_back_hands_out_ids_past_everything_on_it() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 2));
+            store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            let shelf = store.stock();
+
+            let mut restarted = Store::new();
+            restarted.install(Vec::new(), shelf);
+
+            let fresh = restarted.add_stock(vials(15_000, 1));
+            assert_ne!(fresh, id, "a fresh entry cannot collide with a stored one");
+
+            let mixed = restarted
+                .open_vial(id, 2000, date("2026-08-19"))
+                .expect("the second vial is still sealed");
+            let entry = restarted.stock_of(id).expect("the stored entry");
+            assert_ne!(
+                entry.open[0].id, mixed,
+                "nor a fresh vial with one read back"
+            );
         });
     }
 }

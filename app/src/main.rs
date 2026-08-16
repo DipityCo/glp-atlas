@@ -12,13 +12,15 @@ mod kinetics;
 mod nav;
 mod screens;
 mod sky;
+mod stock;
 mod store;
+mod units;
 
 use dioxus::document;
 use dioxus::prelude::*;
 
 use nav::{Direction, Nav};
-use screens::{Body, TabBar, TopBar, STYLESHEET};
+use screens::{Body, Drafting, TabBar, TopBar, STYLESHEET};
 use sky::Sky;
 use store::use_store;
 
@@ -39,6 +41,8 @@ fn main() {
 #[allow(non_snake_case)]
 fn App() -> Element {
     let nav = use_context_provider(Nav::new);
+    let drafting = use_context_provider(Drafting::new);
+    use_effect(move || drafting.expire(nav));
     use_store();
 
     // `use_hook`, not `use_future`: a future re-runs when a signal its body read changes,

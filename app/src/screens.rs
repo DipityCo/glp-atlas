@@ -5,6 +5,7 @@
 //! fixed sample figures.
 
 mod doses;
+mod inventory;
 mod profile;
 mod progress;
 mod style;
@@ -14,6 +15,7 @@ use dioxus::prelude::*;
 
 use crate::nav::{Nav, Page, SubPage};
 
+pub use doses::Drafting;
 pub use style::STYLESHEET;
 
 /// The tab bar's icon for a page.
@@ -111,6 +113,10 @@ pub fn Body() -> Element {
         Some(SubPage::DoseDetail(id)) => rsx! { doses::DoseDetailPage { id } },
         Some(SubPage::LogDose) => rsx! { doses::LogDosePage {} },
         Some(SubPage::EditDose(id)) => rsx! { doses::EditDosePage { id } },
+        Some(SubPage::Inventory) => rsx! { inventory::InventoryPage {} },
+        Some(SubPage::AddStock) => rsx! { inventory::AddStockPage {} },
+        Some(SubPage::StockDetail(id)) => rsx! { inventory::StockDetailPage { id } },
+        Some(SubPage::EditStock(id)) => rsx! { inventory::EditStockPage { id } },
         Some(SubPage::LogWeight) => rsx! { progress::LogWeightPage {} },
         Some(SubPage::Measurements) => rsx! { progress::MeasurementsPage {} },
         Some(SubPage::Medication) => rsx! { profile::MedicationPage {} },
