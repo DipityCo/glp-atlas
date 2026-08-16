@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 use crate::formulary::Drug;
 use crate::kinetics::Sample;
+use crate::store::Clock;
 
 /// Several drugs share an axis of milligrams but never a line, since a milligram of one drug is
 /// not a milligram of another.
@@ -229,9 +230,11 @@ impl DateAxis {
         Self { step, at }
     }
 
-    pub fn format(&self) -> &'static str {
+    /// How `chrono` writes a label at this step. Under a day the label is a time of day, so it
+    /// takes the face the user chose; longer steps are dates, which the setting says nothing about.
+    pub fn format(&self, clock: Clock) -> &'static str {
         if self.step < 1.0 {
-            "%H:%M"
+            clock.face()
         } else if self.step < 28.0 {
             "%-d %b"
         } else {
@@ -422,6 +425,9 @@ pub fn LevelPlot(
     settles: Option<(f64, f64)>,
     /// The point on the axis being read off. Each curve is dotted where it crosses.
     cursor: Option<f64>,
+    /// The face the hour labels on the date axis are written on. A prop rather than context: this
+    /// module knows about drawings and nothing about where the app keeps its records.
+    clock: Clock,
     onnudge: EventHandler<Nudge>,
 ) -> Element {
     let alone = series.len() == 1;
@@ -446,7 +452,7 @@ pub fn LevelPlot(
 
     let step = nice_step(scale.top(), 4.0);
     let dates = DateAxis::across((scale.from(), scale.to()), drawn, 4.0);
-    let format = dates.format();
+    let format = dates.format(clock);
     let right = scale.width() - PAD_RIGHT;
 
     rsx! {
@@ -694,8 +700,13 @@ mod tests {
         assert!(fortnight.step <= 7.0, "{} is too coarse", fortnight.step);
         assert!(month.step <= 14.0);
         assert!(year.step >= 91.0);
-        assert_eq!(fortnight.format(), "%-d %b");
-        assert_eq!(year.format(), "%b %y");
+        assert_eq!(fortnight.format(Clock::TwentyFourHour), "%-d %b");
+        assert_eq!(year.format(Clock::TwentyFourHour), "%b %y");
+        assert_eq!(
+            month.format(Clock::TwelveHour),
+            month.format(Clock::TwentyFourHour),
+            "a date carries no time of day for the setting to reach"
+        );
     }
 
     #[test]
@@ -713,7 +724,12 @@ mod tests {
             "{:?} is too few to read against",
             hours.at
         );
-        assert_eq!(hours.format(), "%H:%M");
+        assert_eq!(hours.format(Clock::TwentyFourHour), "%H:%M");
+        assert_eq!(
+            hours.format(Clock::TwelveHour),
+            Clock::TwelveHour.face(),
+            "the hour labels wear the face the user chose"
+        );
     }
 
     #[test]

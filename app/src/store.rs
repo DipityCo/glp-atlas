@@ -153,8 +153,37 @@ pub fn assumed_time() -> NaiveTime {
 }
 
 /// The time of day, where the device is.
-pub fn clock() -> NaiveTime {
+pub fn time_of_day() -> NaiveTime {
     Local::now().time()
+}
+
+/// Which face the clock shows: whether a time of day reads `14:00` or `2:00 PM`. Chosen by the
+/// user; the platform's locale is never asked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Clock {
+    #[default]
+    TwentyFourHour,
+    TwelveHour,
+}
+
+impl Clock {
+    pub const ALL: [Clock; 2] = [Clock::TwentyFourHour, Clock::TwelveHour];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Clock::TwentyFourHour => "24-hour",
+            Clock::TwelveHour => "AM / PM",
+        }
+    }
+
+    /// How `chrono` writes a time of day on this face.
+    pub fn face(self) -> &'static str {
+        match self {
+            Clock::TwentyFourHour => "%H:%M",
+            // `%-I` rather than `%I`, so one in the afternoon is `1:00 PM` and not `01:00 PM`.
+            Clock::TwelveHour => "%-I:%M %p",
+        }
+    }
 }
 
 /// Reads a time as a time input reports it. An empty box is a dose whose hour was not recorded,
@@ -166,8 +195,14 @@ pub fn parse_time(text: &str) -> Option<NaiveTime> {
         .ok()
 }
 
-/// A time of day, as a 24-hour clock reads it.
-pub fn format_time(time: NaiveTime) -> String {
+/// A time of day, on the face the user chose.
+pub fn format_time(time: NaiveTime, clock: Clock) -> String {
+    time.format(clock.face()).to_string()
+}
+
+/// A time of day as an `<input type="time">` reports and expects it, which is 24-hour whatever
+/// face the control draws itself with.
+pub fn time_value(time: NaiveTime) -> String {
     time.format("%H:%M").to_string()
 }
 
@@ -236,6 +271,7 @@ struct Writing<'a> {
     version: u32,
     doses: &'a [Dose],
     medication: &'a Medication,
+    clock: Clock,
 }
 
 /// The stored document on the way in. Records added within a version default rather than fail,
@@ -247,6 +283,8 @@ struct Reading {
     doses: Vec<Dose>,
     #[serde(default)]
     medication: Medication,
+    #[serde(default)]
+    clock: Clock,
 }
 
 /// What [`READ`] reports back.
@@ -369,6 +407,8 @@ pub struct Store {
     /// The log, kept newest first.
     doses: Signal<Vec<Dose>>,
     medication: Signal<Medication>,
+    /// The face every time of day in the app is written on.
+    clock: Signal<Clock>,
     status: Signal<Status>,
     /// Never reused within a session, so an id held by an open page cannot come to name a dose
     /// logged after it. Not stored: nothing that holds one outlives a restart.
@@ -380,6 +420,7 @@ impl Store {
         Self {
             doses: Signal::new(Vec::new()),
             medication: Signal::new(Medication::default()),
+            clock: Signal::new(Clock::default()),
             status: Signal::new(Status::Loading),
             next_id: Signal::new(0),
         }
@@ -455,6 +496,14 @@ impl Store {
         self.medication.set(medication);
     }
 
+    pub fn clock(self) -> Clock {
+        *self.clock.read()
+    }
+
+    pub fn set_clock(&mut self, clock: Clock) {
+        self.clock.set(clock);
+    }
+
     /// Once, at startup.
     async fn hydrate(mut self) {
         let mut eval = document::eval(READ);
@@ -470,6 +519,7 @@ impl Store {
                 Ok(reading) if reading.version == VERSION => {
                     self.install(reading.doses);
                     self.medication.set(reading.medication);
+                    self.clock.set(reading.clock);
                     Status::Ready
                 }
                 _ => Status::Unreadable,
@@ -503,6 +553,7 @@ impl Store {
             version: VERSION,
             doses: &doses,
             medication: &medication,
+            clock: *self.clock.read(),
         }) else {
             return;
         };
@@ -573,6 +624,16 @@ mod tests {
         store(|store| {
             assert_eq!(store.status(), Status::Loading);
             assert!(store.all().is_empty());
+        });
+    }
+
+    #[test]
+    fn the_clock_opens_on_the_face_the_app_has_always_worn() {
+        store(|mut store| {
+            assert_eq!(store.clock(), Clock::TwentyFourHour);
+
+            store.set_clock(Clock::TwelveHour);
+            assert_eq!(store.clock(), Clock::TwelveHour);
         });
     }
 
@@ -660,10 +721,20 @@ mod tests {
     }
 
     #[test]
-    fn an_hour_survives_being_written_and_read_back() {
-        for text in ["00:00", "07:30", "12:00", "23:59"] {
+    fn an_hour_survives_being_written_and_read_back_on_either_face() {
+        for (text, twelve) in [
+            ("00:00", "12:00 AM"),
+            ("07:30", "7:30 AM"),
+            ("12:00", "12:00 PM"),
+            ("13:05", "1:05 PM"),
+            ("23:59", "11:59 PM"),
+        ] {
             let parsed = parse_time(text).expect("a time a clock shows");
-            assert_eq!(format_time(parsed), text);
+
+            assert_eq!(format_time(parsed, Clock::TwentyFourHour), text);
+            assert_eq!(format_time(parsed, Clock::TwelveHour), twelve);
+            // The form's own box speaks 24-hour whatever face the rest of the app wears.
+            assert_eq!(time_value(parsed), text);
         }
     }
 
@@ -772,6 +843,7 @@ mod tests {
                     },
                 ],
             });
+            store.set_clock(Clock::TwelveHour);
             let doses = store.all();
             let medication = store.medication();
 
@@ -779,6 +851,7 @@ mod tests {
                 version: VERSION,
                 doses: &doses,
                 medication: &medication,
+                clock: store.clock(),
             })
             .expect("the document serialises");
             let read: Reading = serde_json::from_str(&payload).expect("and reads back");
@@ -786,6 +859,7 @@ mod tests {
             assert_eq!(read.version, VERSION);
             assert_eq!(read.doses, doses);
             assert_eq!(read.medication, medication);
+            assert_eq!(read.clock, Clock::TwelveHour);
         });
     }
 
@@ -796,6 +870,11 @@ mod tests {
 
         assert_eq!(read.medication, Medication::default());
         assert!(read.doses.is_empty());
+        assert_eq!(
+            read.clock,
+            Clock::TwentyFourHour,
+            "a document written before the setting reads as the app behaved then"
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use super::Row;
 use crate::formulary::Drug;
 use crate::icons::{ArrowRight, Bell, Check, Cross, Pill};
 use crate::nav::SubPage;
-use crate::store::{format_mg, parse_mg, rung, today, Store, TitrationStep};
+use crate::store::{format_mg, parse_mg, rung, today, Clock, Store, TitrationStep};
 
 /// The days a weekly dose can fall on, from the start of the week.
 const WEEK: [Weekday; 7] = [
@@ -107,7 +107,7 @@ fn read_steps(rows: &[(String, String)]) -> Vec<TitrationStep> {
 
 #[component]
 pub fn ProfilePage() -> Element {
-    let store = use_context::<Store>();
+    let mut store = use_context::<Store>();
     let medication = store.medication();
     let mut units_metric = use_signal(|| false);
 
@@ -148,6 +148,24 @@ pub fn ProfilePage() -> Element {
                     onclick: move |_| units_metric.set(true),
                     "Kilograms"
                 }
+            }
+        }
+
+        div { class: "card tight",
+            h2 { class: "card-title", "Clock" }
+            div { class: "chips",
+                for face in Clock::ALL {
+                    button {
+                        key: "{face:?}",
+                        class: if store.clock() == face { "chip on" } else { "chip" },
+                        aria_pressed: "{store.clock() == face}",
+                        onclick: move |_| store.set_clock(face),
+                        "{face.label()}"
+                    }
+                }
+            }
+            p { class: "note",
+                "The time box on the dose form is drawn by the device and keeps the device's own format."
             }
         }
 
