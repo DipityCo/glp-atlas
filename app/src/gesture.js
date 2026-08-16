@@ -123,6 +123,19 @@ const move = (point) => {
   if (shell) shell.style.transform = `translate3d(${dx * CONTENT_FOLLOW}px, 0, 0)`;
 };
 
+// Puts the field back without a page change, for a gesture that stopped being a swipe: the
+// platform taking it back, or a second finger arriving. Going through `end` instead would commit
+// a navigation from a drag the user never finished, and returning early out of it would leave
+// `dragging` on, holding the field transitionless at whatever offset it had reached.
+const cancel = () => {
+  if (!origin) return;
+  origin = null;
+  axis = null;
+  travel = 0;
+  app.classList.remove("dragging");
+  release();
+};
+
 const end = () => {
   if (!origin) return;
   origin = null;
@@ -165,7 +178,7 @@ let mousing = false;
 const touchStart = (event) => {
   touchedAt = Date.now();
   if (event.touches.length !== 1) {
-    origin = null;
+    cancel();
     return;
   }
   start(event.touches[0]);
@@ -177,6 +190,10 @@ const touchMove = (event) => {
 const touchEnd = () => {
   touchedAt = Date.now();
   end();
+};
+const touchCancel = () => {
+  touchedAt = Date.now();
+  cancel();
 };
 
 const mouseStart = (event) => {
@@ -196,7 +213,7 @@ const mouseEnd = () => {
 app.addEventListener("touchstart", touchStart, { passive: true });
 app.addEventListener("touchmove", touchMove, { passive: true });
 app.addEventListener("touchend", touchEnd, { passive: true });
-app.addEventListener("touchcancel", touchEnd, { passive: true });
+app.addEventListener("touchcancel", touchCancel, { passive: true });
 app.addEventListener("mousedown", mouseStart, { passive: true });
 app.addEventListener("mousemove", mouseMove, { passive: true });
 // On the window as well: a button released outside the field would otherwise leave the swipe
@@ -208,7 +225,7 @@ window.__atlasSwipeCleanup = () => {
   app.removeEventListener("touchstart", touchStart);
   app.removeEventListener("touchmove", touchMove);
   app.removeEventListener("touchend", touchEnd);
-  app.removeEventListener("touchcancel", touchEnd);
+  app.removeEventListener("touchcancel", touchCancel);
   app.removeEventListener("mousedown", mouseStart);
   app.removeEventListener("mousemove", mouseMove);
   app.removeEventListener("mouseup", mouseEnd);
