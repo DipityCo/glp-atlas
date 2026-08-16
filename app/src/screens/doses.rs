@@ -533,15 +533,21 @@ pub fn DosesPage() -> Element {
             }
         }
 
+        // On the doses the chart can use, not on the medication record: a record naming a drug
+        // that no dose carries leaves nothing to draw, and gating on it would hide this row too.
         if !log.is_empty() {
-            if medication.drug.is_some() || log.iter().any(|dose| dose.drug.is_some()) {
+            if log.iter().any(|dose| dose.drug.is_some()) {
                 LevelCard { doses: log.clone(), medication: medication.clone() }
             } else {
                 div { class: "card flush",
                     Row {
                         icon: rsx! { Pill { size: 20 } },
                         title: "Medication level",
-                        sub: "Needs to know which drug you take",
+                        sub: if medication.drug.is_some() {
+                            "Needs the drug on your doses"
+                        } else {
+                            "Needs to know which drug you take"
+                        },
                         target: SubPage::Medication,
                     }
                 }

@@ -1,8 +1,8 @@
 //! The page bodies and the chrome that frames them: title bar, scrolling content column,
 //! and the persistent tab bar.
 //!
-//! The Doses pages read and write the dose log in [`crate::store`]. Progress and Profile are
-//! still layout over fixed sample figures.
+//! The Doses and Profile pages read and write [`crate::store`]. Progress is still layout over
+//! fixed sample figures.
 
 mod doses;
 mod profile;

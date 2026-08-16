@@ -310,23 +310,28 @@ const wheel = (event) => {
 // Touch and mouse rather than pointer events, because gesture.js listens on the same element
 // through these and two layers reading one finger through different APIs would diverge.
 //
-// A touch fires compatibility mouse events after itself. `touching` keeps those from being read
-// as a second gesture.
+// A touch fires compatibility mouse events after itself, and unguarded they read as a second
+// gesture. They arrive right behind the touch, so the mouse path is ignored for a moment after
+// one rather than latched off: a latch would disable the mouse for good on a device that has both.
 const MOUSE = "mouse";
-let touching = false;
+/** How long after a touch a mouse event is taken to be that touch's echo. */
+const TOUCH_TAIL_MS = 500;
+let touchedAt = 0;
 
 const touchStart = (event) => {
-  touching = true;
+  touchedAt = Date.now();
   for (const touch of event.changedTouches) {
     down(touch.identifier, touch);
   }
 };
 const touchMove = (event) => {
+  touchedAt = Date.now();
   for (const touch of event.changedTouches) {
     moved(touch.identifier, touch);
   }
 };
 const touchEnd = (event) => {
+  touchedAt = Date.now();
   for (const touch of event.changedTouches) {
     up(touch.identifier);
   }
@@ -335,12 +340,13 @@ const touchEnd = (event) => {
 // it through `up` would report whatever the chart had moved to, and a cancelled touch that had
 // barely moved would report as a tap and move the reading.
 const touchCancel = () => {
+  touchedAt = Date.now();
   pointers.clear();
   release();
 };
 
 const mouseStart = (event) => {
-  if (touching || event.button !== 0) return;
+  if (Date.now() - touchedAt < TOUCH_TAIL_MS || event.button !== 0) return;
   // Dragging across an SVG otherwise starts a native drag or a text selection, either of which
   // swallows every move after the first. Hence the non-passive listener.
   if (down(MOUSE, event)) event.preventDefault();
@@ -354,7 +360,10 @@ app.addEventListener("touchend", touchEnd, { passive: true });
 app.addEventListener("touchcancel", touchCancel, { passive: true });
 app.addEventListener("mousedown", mouseStart, { passive: false });
 app.addEventListener("mousemove", mouseMove, { passive: true });
+// On the window as well: a button released off the chart, or outside the page altogether, would
+// otherwise leave the drag running and the curve following an unpressed cursor.
 app.addEventListener("mouseup", mouseEnd, { passive: true });
+window.addEventListener("mouseup", mouseEnd, { passive: true });
 // Not passive: a wheel held with ctrl zooms the page unless this one is answered.
 app.addEventListener("wheel", wheel, { passive: false });
 
@@ -366,6 +375,7 @@ window.__atlasPlotCleanup = () => {
   app.removeEventListener("mousedown", mouseStart);
   app.removeEventListener("mousemove", mouseMove);
   app.removeEventListener("mouseup", mouseEnd);
+  window.removeEventListener("mouseup", mouseEnd);
   app.removeEventListener("wheel", wheel);
   if (idle) clearTimeout(idle);
   idle = null;

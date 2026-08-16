@@ -154,13 +154,16 @@ const end = () => {
 // Touch and mouse rather than pointer events: touch is what carries this on a phone, and the
 // mouse half is what lets `make web` drive the same thing in a browser.
 //
-// A touch fires compatibility mouse events after itself. `touching` keeps those from being read
-// as a second gesture.
-let touching = false;
+// A touch fires compatibility mouse events after itself, and unguarded they read as a second
+// gesture. They arrive right behind the touch, so the mouse path is ignored for a moment after
+// one rather than latched off: a latch would disable the mouse for good on a device that has both.
+/** How long after a touch a mouse event is taken to be that touch's echo. */
+const TOUCH_TAIL_MS = 500;
+let touchedAt = 0;
 let mousing = false;
 
 const touchStart = (event) => {
-  touching = true;
+  touchedAt = Date.now();
   if (event.touches.length !== 1) {
     origin = null;
     return;
@@ -168,11 +171,16 @@ const touchStart = (event) => {
   start(event.touches[0]);
 };
 const touchMove = (event) => {
+  touchedAt = Date.now();
   if (event.touches.length === 1) move(event.touches[0]);
+};
+const touchEnd = () => {
+  touchedAt = Date.now();
+  end();
 };
 
 const mouseStart = (event) => {
-  if (touching || event.button !== 0) return;
+  if (Date.now() - touchedAt < TOUCH_TAIL_MS || event.button !== 0) return;
   mousing = true;
   start(event);
 };
@@ -187,21 +195,24 @@ const mouseEnd = () => {
 
 app.addEventListener("touchstart", touchStart, { passive: true });
 app.addEventListener("touchmove", touchMove, { passive: true });
-app.addEventListener("touchend", end, { passive: true });
-app.addEventListener("touchcancel", end, { passive: true });
+app.addEventListener("touchend", touchEnd, { passive: true });
+app.addEventListener("touchcancel", touchEnd, { passive: true });
 app.addEventListener("mousedown", mouseStart, { passive: true });
 app.addEventListener("mousemove", mouseMove, { passive: true });
+// On the window as well: a button released outside the field would otherwise leave the swipe
+// running, and the page would keep panning under a cursor with nothing held.
 app.addEventListener("mouseup", mouseEnd, { passive: true });
+window.addEventListener("mouseup", mouseEnd, { passive: true });
 
 window.__atlasSwipeCleanup = () => {
   app.removeEventListener("touchstart", touchStart);
   app.removeEventListener("touchmove", touchMove);
-  app.removeEventListener("touchend", end);
-  app.removeEventListener("touchcancel", end);
+  app.removeEventListener("touchend", touchEnd);
+  app.removeEventListener("touchcancel", touchEnd);
   app.removeEventListener("mousedown", mouseStart);
   app.removeEventListener("mousemove", mouseMove);
   app.removeEventListener("mouseup", mouseEnd);
-  touching = false;
+  window.removeEventListener("mouseup", mouseEnd);
   mousing = false;
   if (settle) clearTimeout(settle);
   release();

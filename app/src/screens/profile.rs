@@ -71,9 +71,38 @@ fn store_plan(store: &mut Store, rows: &[(String, String)]) {
     let Some(titration) = read_plan(rows) else {
         return;
     };
+    write_plan(store, titration);
+}
+
+/// Puts the rows that are steps into the record, leaving out any that are not one yet.
+///
+/// For a row being removed, where waiting for the rest of the form to be valid would drop the
+/// removal: the row is gone from the page while the record still holds it, and it comes back the
+/// next time the page is opened.
+fn store_plan_without(store: &mut Store, rows: &[(String, String)]) {
+    write_plan(store, read_steps(rows));
+}
+
+fn write_plan(store: &mut Store, titration: Vec<TitrationStep>) {
     let mut medication = store.medication();
     medication.titration = titration;
     store.set_medication(medication);
+}
+
+/// The rows that describe a step, skipping the blank and the half-filled.
+fn read_steps(rows: &[(String, String)]) -> Vec<TitrationStep> {
+    rows.iter()
+        .filter_map(|(strength, weeks)| {
+            Some(TitrationStep {
+                micrograms: parse_mg(strength)?,
+                weeks: weeks
+                    .trim()
+                    .parse()
+                    .ok()
+                    .filter(|weeks| (1..=MAX_WEEKS).contains(weeks))?,
+            })
+        })
+        .collect()
 }
 
 #[component]
@@ -302,7 +331,7 @@ pub fn MedicationPage() -> Element {
                         aria_label: "Remove step {index + 1}",
                         onclick: move |_| {
                             rows.write().remove(index);
-                            store_plan(&mut store, &rows());
+                            store_plan_without(&mut store, &rows());
                         },
                         Cross { size: 16 }
                     }

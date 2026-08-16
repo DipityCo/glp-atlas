@@ -212,8 +212,12 @@ mod tests {
                 );
             }
             assert!(
-                script.contains("touching"),
+                script.contains("TOUCH_TAIL_MS"),
                 "a touch fires mouse events after itself, and unguarded they are a second gesture"
+            );
+            assert!(
+                !script.contains("let touching"),
+                "a latch never released leaves the mouse dead for the session on a device with both"
             );
         }
     }
