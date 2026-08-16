@@ -1,0 +1,99 @@
+name: Package Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Build the release APK rather than the debug one
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      release:
+        description: Build the release APK rather than the debug one
+        type: boolean
+        default: false
+    outputs:
+      artifact:
+        description: Name of the uploaded APK artifact
+        value: ${{ jobs.apk.outputs.artifact }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  DX_VERSION: 0.7.10
+  SDK_VERSION: 36
+  BUILD_TOOLS_VERSION: 36.0.0
+  NDK_VERSION: 27.2.12479018
+
+jobs:
+  apk:
+    name: Build the ${{ inputs.release && 'release' || 'debug' }} APK
+    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || github.repository == 'DipityCo/glp-atlas'
+    env:
+      PROFILE: ${{ inputs.release && 'release' || 'debug' }}
+    outputs:
+      artifact: ${{ steps.artifact.outputs.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Name the artifact
+        id: artifact
+        run: echo "name=glp-atlas-$PROFILE-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-${{ env.SDK_VERSION }}
+            build-tools;${{ env.BUILD_TOOLS_VERSION }}
+            ndk;${{ env.NDK_VERSION }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          cache-workspaces: app
+          cache-key: android-${{ env.PROFILE }}
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ env.DX_VERSION }}-${{ hashFiles('scripts/build-android.sh', 'app/Dioxus.toml') }}
+          restore-keys: gradle-${{ runner.os }}-${{ env.DX_VERSION }}-
+
+      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        with:
+          tool: dioxus-cli@${{ env.DX_VERSION }}
+
+      - name: Build
+        id: build
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}"
+          if [ "$PROFILE" = release ]; then
+            make apk-release
+          else
+            make apk
+          fi
+          apk=$(find "app/target/dx/glp-atlas/$PROFILE/android" -name 'glp-atlas-*.apk' -print -quit)
+          [ -n "$apk" ] || { echo "no APK produced" >&2; exit 1; }
+          echo "apk=$apk" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.build.outputs.apk }}
+          if-no-files-found: error
+          retention-days: 30
