@@ -12,15 +12,21 @@ RELEASE_APK := app/target/dx/glp-atlas/release/android/app/app/build/outputs/apk
 ANDROID_RUSTFLAGS := $${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384
 
 .DEFAULT_GOAL := help
-.PHONY: help check test fmt fmt-check clippy web hotpatch apk apk-release install install-release logcat ci clean
+.PHONY: help check check-wasm check-android test fmt fmt-check clippy shellcheck web hotpatch apk apk-release install install-release logcat ci clean
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| sort \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
-check: ## Type-check the app
-	cargo check --manifest-path $(APP)/Cargo.toml
+check: check-wasm check-android ## Type-check both targets the app ships to
+
+check-wasm: ## Type-check the web build
+	cargo check --manifest-path $(APP)/Cargo.toml --target wasm32-unknown-unknown \
+		--no-default-features --features web
+
+check-android: ## Type-check the shipping Android target
+	cargo check --manifest-path $(APP)/Cargo.toml --target aarch64-linux-android
 
 test: ## Run the unit tests
 	cargo test --manifest-path $(APP)/Cargo.toml
@@ -33,6 +39,10 @@ fmt-check: ## Verify formatting without modifying files
 
 clippy: ## Lint with clippy
 	cargo clippy --manifest-path $(APP)/Cargo.toml --all-targets -- -D warnings
+
+# Info-level findings are advisory; warnings and above are not.
+shellcheck: ## Lint the shell scripts
+	shellcheck --severity=warning scripts/*.sh
 
 web: ## Serve the UI in a browser, the fast loop for working on the star field
 	cd $(APP) && dx serve --platform web
@@ -59,7 +69,7 @@ install-release: apk-release ## Build + install the release APK on a connected d
 logcat: ## Tail the app's logs
 	adb logcat -c && adb logcat RustStdoutStderr:* AndroidRuntime:E *:S
 
-ci: fmt-check clippy check test ## Run the checks CI should gate on
+ci: fmt-check clippy shellcheck check test ## Run everything CI gates on
 
 clean: ## Remove all build artifacts
 	cargo clean --manifest-path $(APP)/Cargo.toml
