@@ -8,6 +8,11 @@ TARGET_DIR  := $(or $(CARGO_TARGET_DIR),target)
 DEBUG_APK   := $(TARGET_DIR)/dx/glp-atlas/debug/android/app/app/build/outputs/apk/debug/glp-atlas-debug.apk
 RELEASE_APK := $(TARGET_DIR)/dx/glp-atlas/release/android/app/app/build/outputs/apk/release/glp-atlas-release.apk
 
+# The dx targets below build from app/, where a relative target directory would resolve
+# against a different directory than the paths above, so pin it to the caller's. Mirrors
+# scripts/build-android.sh.
+ABS_TARGET_DIR := $(abspath $(TARGET_DIR))
+
 # 16 KB LOAD-segment alignment, for Android 15+ devices with a 16 KB page size. dx overrides
 # target rustflags from .cargo/config.toml, so this goes through RUSTFLAGS.
 ANDROID_RUSTFLAGS := $${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384
@@ -46,13 +51,13 @@ shellcheck: ## Lint the shell scripts
 	shellcheck --severity=warning scripts/*.sh
 
 web: ## Serve the UI in a browser, the fast loop for working on the star field
-	cd $(APP) && dx serve --platform web
+	cd $(APP) && CARGO_TARGET_DIR="$(ABS_TARGET_DIR)" dx serve --platform web
 
 # dx generates, installs and launches its own Android project, reading app/Dioxus.toml but
 # not this file, so the launcher label and icon are dx's defaults. Hot-patching is
 # experimental upstream. DEVICE=<name> picks between attached devices.
 hotpatch: ## Live-patch Rust changes into the app on a connected device (DEVICE=<name> optional)
-	cd $(APP) && RUSTFLAGS="$(ANDROID_RUSTFLAGS)" \
+	cd $(APP) && RUSTFLAGS="$(ANDROID_RUSTFLAGS)" CARGO_TARGET_DIR="$(ABS_TARGET_DIR)" \
 		dx serve --platform android --hot-patch $(if $(DEVICE),--device $(DEVICE))
 
 apk: ## Build the debug APK
