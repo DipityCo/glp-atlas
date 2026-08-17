@@ -1,6 +1,6 @@
 [package]
 name = "glp-atlas"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "GLP Atlas: a GLP-1 dose and progress tracker"
 license = "AGPL-3.0-or-later"
