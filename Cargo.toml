@@ -1,0 +1,22 @@
+# The workspace root sits here, not in app/, because release-plz's `git_only` versioning reads
+# the manifest at the repository root.
+[workspace]
+members = ["app"]
+resolver = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"
+
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+
+[profile.server-dev]
+inherits = "dev"
+
+[profile.android-dev]
+inherits = "dev"

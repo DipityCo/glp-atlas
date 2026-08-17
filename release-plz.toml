@@ -1,8 +1,8 @@
 [workspace]
-publish = false
+git_only = true
 git_tag_name = "v{{ version }}"
 git_release_draft = true
 
 [[package]]
 name = "glp-atlas"
-changelog_path = "../CHANGELOG.md"
+changelog_path = "CHANGELOG.md"

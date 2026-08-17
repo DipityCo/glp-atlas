@@ -1,5 +1,4 @@
 /target
-/app/target
 
 # Dioxus / cargo-mobile2 generated Android project + build output
 /app/gen

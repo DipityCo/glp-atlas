@@ -42,20 +42,3 @@ web = ["dioxus/web"]
 [target.'cfg(target_os = "android")'.dependencies]
 log = "0.4"
 android_logger = "0.15"
-
-[profile.release]
-opt-level = "s"
-lto = true
-codegen-units = 1
-strip = true
-panic = "unwind"
-
-[profile.wasm-dev]
-inherits = "dev"
-opt-level = 1
-
-[profile.server-dev]
-inherits = "dev"
-
-[profile.android-dev]
-inherits = "dev"

@@ -4,8 +4,9 @@
 # ANDROID_HOME and ANDROID_NDK_HOME.
 
 APP         := app
-DEBUG_APK   := app/target/dx/glp-atlas/debug/android/app/app/build/outputs/apk/debug/glp-atlas-debug.apk
-RELEASE_APK := app/target/dx/glp-atlas/release/android/app/app/build/outputs/apk/release/glp-atlas-release.apk
+TARGET_DIR  := $(or $(CARGO_TARGET_DIR),target)
+DEBUG_APK   := $(TARGET_DIR)/dx/glp-atlas/debug/android/app/app/build/outputs/apk/debug/glp-atlas-debug.apk
+RELEASE_APK := $(TARGET_DIR)/dx/glp-atlas/release/android/app/app/build/outputs/apk/release/glp-atlas-release.apk
 
 # 16 KB LOAD-segment alignment, for Android 15+ devices with a 16 KB page size. dx overrides
 # target rustflags from .cargo/config.toml, so this goes through RUSTFLAGS.
