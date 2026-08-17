@@ -242,6 +242,7 @@ pub fn StockDetailPage(id: StockId) -> Element {
         }
         button {
             class: if arming() { "btn block warn" } else { "btn block" },
+            aria_describedby: arming().then_some("stock-delete-warning"),
             onclick: move |_| {
                 if arming() {
                     store.remove_stock(id);
@@ -253,7 +254,7 @@ pub fn StockDetailPage(id: StockId) -> Element {
             if arming() { "Tap again to delete" } else { "Delete these vials" }
         }
         if arming() {
-            p { class: "note caution",
+            p { id: "stock-delete-warning", class: "note caution",
                 "Doses drawn from these vials stay in the log; they simply stop naming a vial."
             }
         }

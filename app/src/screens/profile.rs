@@ -111,6 +111,7 @@ pub fn ProfilePage() -> Element {
     let mut store = use_context::<Store>();
     let medication = store.medication();
     let mut units_metric = use_signal(|| false);
+    let mut arming = use_signal(|| false);
 
     let summary = match (medication.drug, medication.dose_day) {
         (Some(drug), Some(day)) => format!("{} · {}s", drug.label(), weekday_name(day)),
@@ -183,6 +184,23 @@ pub fn ProfilePage() -> Element {
                     span { class: "row-sub", "Version 0.1.0" }
                 }
             }
+        }
+
+        button {
+            class: if arming() { "btn block danger warn" } else { "btn block danger" },
+            aria_describedby: arming().then_some("wipe-warning"),
+            onclick: move |_| {
+                if arming() {
+                    store.wipe();
+                    arming.set(false);
+                } else {
+                    arming.set(true);
+                }
+            },
+            if arming() { "Tap again to delete everything" } else { "Delete all data" }
+        }
+        if arming() {
+            p { id: "wipe-warning", class: "note danger", "This cannot be undone." }
         }
 
         p { class: "note",

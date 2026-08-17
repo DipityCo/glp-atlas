@@ -14,6 +14,9 @@ pub const STYLESHEET: &str = r#"
   --accent: #9fc0ff;
   --accent-deep: #6f92e0;
   --warm: #f2c48d;
+  /* For what deletes something. The lightness of --warm, so it reads as red beside it rather than
+     as a brighter alarm, at 4.9:1 over the card. */
+  --danger: #f2928c;
   /* One tint per drug. Checked against the card behind them for lightness, chroma, contrast, and
      for telling any two apart under protanopia, deuteranopia and tritanopia. Changing one means
      checking the set again. */
@@ -695,6 +698,16 @@ body {
   background: rgba(242, 196, 141, 0.16);
   color: var(--warm);
 }
+/* Red at rest, for a delete that goes further than one record. */
+.btn.danger {
+  border-color: rgba(242, 146, 140, 0.42);
+  color: var(--danger);
+}
+.btn.danger.warn {
+  border-color: rgba(242, 146, 140, 0.62);
+  background: rgba(242, 146, 140, 0.18);
+  color: var(--danger);
+}
 .btn:active { transform: translateY(1px); }
 .btn:disabled { opacity: 0.45; box-shadow: none; cursor: default; }
 .btn:disabled:active { transform: none; }
@@ -702,6 +715,7 @@ body {
 .note { margin: 0; font-size: 0.8rem; line-height: 1.55; color: var(--ink-faint); }
 /* For a note about what the app knows less well than the rest. */
 .note.caution { color: var(--warm); }
+.note.danger { color: var(--danger); }
 
 /* Drawn in pseudo-elements so the button can be a full-size target without the track
    growing to match. */
