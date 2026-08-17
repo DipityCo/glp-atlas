@@ -31,9 +31,7 @@ impl Form {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct StockId(pub(crate) u64);
 
-/// Serialized where its siblings are not: [`crate::store::Dose`] carries one and has no frozen
-/// schema of its own yet.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct VialId(pub(crate) u64);
 
 impl StockId {
