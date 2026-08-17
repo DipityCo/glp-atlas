@@ -18,10 +18,13 @@ use crate::kinetics::{curve, instant_of, moment, on_board, spent, Given, Kinetic
 use crate::nav::{Nav, SubPage};
 use crate::stock::{Stock, VialId};
 use crate::store::{
-    format_time, parse_time, rung, suggest_site, time_of_day, time_value, today, Clock, Cycle,
-    Dose, DoseId, Draft, Medication, Site, Status, Store, TitrationStep,
+    rung, suggest_site, time_of_day, today, Cycle, Dose, DoseId, Draft, Drawn, Medication, Site,
+    Status, Store, TitrationStep,
 };
-use crate::units::{format_level, format_mg, format_units, format_volume, parse_mg};
+use crate::units::{
+    format_level, format_mg, format_time, format_units, format_volume, parse_mg, parse_time,
+    time_value, Clock,
+};
 
 /// Weekday, day and month: `Thursday 6 Aug`.
 fn long_date(date: NaiveDate) -> String {
@@ -48,6 +51,100 @@ fn fits(held: Option<Drug>, given: Option<Drug>) -> bool {
     match (held, given) {
         (Some(held), Some(given)) => held == given,
         _ => true,
+    }
+}
+
+/// What a vial can still give the dose being entered: what is left of it, with the share this dose
+/// already takes out of it put back, since editing must not read its own draw as already gone.
+fn spare(store: Store, editing: Option<DoseId>, vial: VialId) -> u32 {
+    let Some((_, held)) = store.vial(vial) else {
+        return 0;
+    };
+    let returned = editing
+        .and_then(|id| store.get(id))
+        .map_or(0, |dose| share_of(&dose.from, vial));
+    store.remaining(&held).saturating_add(returned)
+}
+
+fn share_of(from: &[Drawn], vial: VialId) -> u32 {
+    from.iter()
+        .filter(|drawn| drawn.vial == vial)
+        .fold(0, |sum, drawn| sum.saturating_add(drawn.micrograms))
+}
+
+fn vial_name(store: Store, vial: VialId) -> String {
+    store
+        .vial(vial)
+        .map_or_else(String::new, |(entry, _)| entry.name().to_owned())
+}
+
+/// Drops any vial discarded from the inventory while this form was open.
+fn on_shelf(store: Store, picks: &[DrawnDraft]) -> Vec<DrawnDraft> {
+    picks
+        .iter()
+        .filter(|pick| store.vial(pick.vial).is_some())
+        .cloned()
+        .collect()
+}
+
+/// What one vial gave, where the dose is split across several. An empty box is a vial that gave
+/// nothing rather than a figure nobody can read: [`apportion`] leaves it empty wherever the vials
+/// before it already cover the dose.
+fn share(amount: &str) -> Option<u32> {
+    if amount.trim().is_empty() {
+        Some(0)
+    } else {
+        parse_mg(amount)
+    }
+}
+
+/// The whole dose from a lone vial, or what each amount box reads where it is split. A vial that
+/// gave nothing is left out: what is left in one follows from the shares in the log, and a share
+/// of nothing is nothing to follow.
+fn drawn_from(picks: &[DrawnDraft], micrograms: u32) -> Vec<Drawn> {
+    match picks {
+        [lone] => vec![Drawn {
+            vial: lone.vial,
+            micrograms,
+        }],
+        split => split
+            .iter()
+            .filter_map(|pick| {
+                Some(Drawn {
+                    vial: pick.vial,
+                    micrograms: share(&pick.amount).filter(|share| *share > 0)?,
+                })
+            })
+            .collect(),
+    }
+}
+
+fn lone_takes_it_all(picks: &mut [DrawnDraft]) {
+    if let [lone] = picks {
+        lone.amount = String::new();
+    }
+}
+
+/// Writes in the shares nobody has typed: each vial gives what it has left until the dose is
+/// covered, and the last one picked takes whatever is still short.
+fn apportion(picks: &mut [DrawnDraft], micrograms: u32, left: impl Fn(VialId) -> u32) {
+    let last = picks.len().saturating_sub(1);
+    let mut needed = micrograms;
+    for (index, pick) in picks.iter_mut().enumerate() {
+        let given = if let Some(typed) = parse_mg(&pick.amount) {
+            typed
+        } else {
+            let fill = if index == last {
+                needed
+            } else {
+                left(pick.vial).min(needed)
+            };
+            if fill > 0 {
+                pick.amount = format_mg(fill);
+            }
+            fill
+        };
+        needed = needed.saturating_sub(given);
     }
 }
 
@@ -646,15 +743,26 @@ pub fn DoseDetailPage(id: DoseId) -> Element {
         Some(drug) => drug.label().to_owned(),
         None => "No drug set".to_owned(),
     };
-    let source = dose
+    let split = dose.from.len() > 1;
+    let source: Vec<String> = dose
         .from
-        .and_then(|id| store.vial(id))
-        .map(|(entry, vial)| {
-            let volume = vial.draw(dose.micrograms).map_or_else(String::new, |ul| {
+        .iter()
+        .filter_map(|drawn| {
+            let (entry, vial) = store.vial(drawn.vial)?;
+            let volume = vial.draw(drawn.micrograms).map_or_else(String::new, |ul| {
                 format!(" · {} mL, {} units", format_volume(ul), format_units(ul))
             });
-            format!("{}{volume}", entry.name())
-        });
+            Some(if split {
+                format!(
+                    "{} mg from {}{volume}",
+                    format_mg(drawn.micrograms),
+                    entry.name()
+                )
+            } else {
+                format!("{}{volume}", entry.name())
+            })
+        })
+        .collect();
 
     rsx! {
         div { class: "card hero",
@@ -685,10 +793,12 @@ pub fn DoseDetailPage(id: DoseId) -> Element {
             }
         }
 
-        if let Some(source) = source {
+        if !source.is_empty() {
             div { class: "card tight",
                 h2 { class: "card-title", "Drawn from" }
-                p { class: "note", "{source}" }
+                for (index , line) in source.iter().enumerate() {
+                    p { key: "{index}", class: "note", "{line}" }
+                }
             }
         }
 
@@ -741,6 +851,14 @@ pub fn EditDosePage(id: DoseId) -> Element {
     }
 }
 
+/// A [`Drawn`] as the form holds it. The amount is empty where the dose names one vial, which
+/// gives the whole of it however the strength box comes to read.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DrawnDraft {
+    pub vial: VialId,
+    pub amount: String,
+}
+
 /// Raw text rather than read figures, so a strength typed half way comes back half way.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Unsaved {
@@ -749,7 +867,7 @@ pub struct Unsaved {
     pub strength: String,
     pub site: Site,
     pub drug: Option<Drug>,
-    pub from: Option<VialId>,
+    pub from: Vec<DrawnDraft>,
     pub note: String,
 }
 
@@ -859,9 +977,27 @@ fn DoseForm(id: Option<DoseId>) -> Element {
         matching
             .next()
             .filter(|_| matching.next().is_none())
-            .map(|(_, vial)| vial.id)
+            .map(|(_, vial)| DrawnDraft {
+                vial: vial.id,
+                amount: String::new(),
+            })
+            .into_iter()
+            .collect()
     };
-    let default_from = existing.as_ref().map_or_else(sole_match, |dose| dose.from);
+    let default_from: Vec<DrawnDraft> = existing.as_ref().map_or_else(sole_match, |dose| {
+        let split = dose.from.len() > 1;
+        dose.from
+            .iter()
+            .map(|drawn| DrawnDraft {
+                vial: drawn.vial,
+                amount: if split {
+                    format_mg(drawn.micrograms)
+                } else {
+                    String::new()
+                },
+            })
+            .collect()
+    });
 
     // Where the form was stepped out of to mix or add a vial, it opens on what it was left
     // holding rather than on the defaults above.
@@ -882,7 +1018,9 @@ fn DoseForm(id: Option<DoseId>) -> Element {
     );
     let start_site = held.as_ref().map_or(default_site, |unsaved| unsaved.site);
     let start_drug = held.as_ref().map_or(default_drug, |unsaved| unsaved.drug);
-    let start_from = held.as_ref().map_or(default_from, |unsaved| unsaved.from);
+    let start_from = held
+        .as_ref()
+        .map_or(default_from, |unsaved| unsaved.from.clone());
     let start_note = held.map_or(default_note, |unsaved| unsaved.note);
 
     let mut date = use_signal(move || start_date);
@@ -891,7 +1029,7 @@ fn DoseForm(id: Option<DoseId>) -> Element {
     let mut site = use_signal(move || start_site);
     let mut drug = use_signal(move || start_drug);
     let mut note = use_signal(move || start_note);
-    let mut from = use_signal(move || start_from);
+    let mut picks = use_signal(move || start_from);
 
     // Reads every box, so it runs again on every keystroke and the form is always held as it
     // stands. Stepping out to the inventory remounts this component; this outlives it.
@@ -904,7 +1042,7 @@ fn DoseForm(id: Option<DoseId>) -> Element {
                 strength: strength(),
                 site: site(),
                 drug: drug(),
-                from: from(),
+                from: picks(),
                 note: note(),
             },
         );
@@ -914,51 +1052,79 @@ fn DoseForm(id: Option<DoseId>) -> Element {
     let hour = parse_time(&time());
     let micrograms = parse_mg(&strength());
     let mistyped = micrograms.is_none() && !strength().trim().is_empty();
-    let ready = taken.is_some() && micrograms.is_some();
 
-    // Vials that could hold this dose, and whichever is picked whether it could or not: one
+    let picked = on_shelf(store, &picks());
+    let split = picked.len() > 1;
+    let shares: Vec<(VialId, Option<u32>)> = picked
+        .iter()
+        .map(|pick| {
+            (
+                pick.vial,
+                if split {
+                    share(&pick.amount)
+                } else {
+                    micrograms
+                },
+            )
+        })
+        .collect();
+    let unread = shares.iter().any(|(_, share)| share.is_none());
+    let ready = taken.is_some() && micrograms.is_some() && !unread;
+
+    // Vials that could hold this dose, and whichever are picked whether they could or not: one
     // recorded before the drug was changed still has to be visible to be unpicked.
     let choices: Vec<(VialId, String)> = vials
         .iter()
-        .filter(|(entry, vial)| fits(entry.drug, drug()) || from() == Some(vial.id))
+        .filter(|(entry, vial)| {
+            fits(entry.drug, drug()) || picked.iter().any(|pick| pick.vial == vial.id)
+        })
         .map(|(entry, vial)| (vial.id, vial_label(store, entry, vial)))
         .collect();
 
-    // Sealed vials this dose could have come from, where none is mixed yet. Mixing happens here
-    // rather than on the Inventory page: leaving the form would remount it and lose what has
-    // been entered so far.
+    // Sealed vials this dose could have come from. Mixing happens here rather than on the
+    // Inventory page: leaving the form would remount it and lose what has been entered so far.
     let mixable: Vec<Stock> = store
         .stock()
         .into_iter()
         .filter(|entry| entry.sealed > 0 && fits(entry.drug, drug()))
         .collect();
 
-    let mismatch = from()
-        .and_then(|id| store.vial(id))
-        .and_then(|(entry, _)| entry.drug)
-        .filter(|held| drug().is_some_and(|given| given != *held));
+    let mismatch = picked.iter().find_map(|pick| {
+        store
+            .vial(pick.vial)
+            .and_then(|(entry, _)| entry.drug)
+            .filter(|held| drug().is_some_and(|given| given != *held))
+    });
 
-    let drawn =
-        from()
-            .and_then(|id| store.vial(id))
-            .zip(micrograms)
-            .map(|((_, vial), micrograms)| {
-                let volume = vial.draw(micrograms).map(|microlitres| {
-                    format!(
-                        "Draw {} mL, {} units",
-                        format_volume(microlitres),
-                        format_units(microlitres)
-                    )
-                });
-                // This dose's own draw is already counted against the vial; put it back before
-                // asking whether the new strength fits.
-                let returned = existing
-                    .as_ref()
-                    .filter(|dose| dose.from == Some(vial.id))
-                    .map_or(0, |dose| dose.micrograms);
-                let short = micrograms > store.remaining(&vial).saturating_add(returned);
-                (volume, short)
-            });
+    let draws: Vec<String> = shares
+        .iter()
+        .filter_map(|&(vial, share)| {
+            let (entry, held) = store.vial(vial)?;
+            // A vial that gave nothing has no draw to quote.
+            let microlitres = held.draw(share.filter(|share| *share > 0)?)?;
+            let out_of = if split {
+                format!(" from {}", entry.name())
+            } else {
+                String::new()
+            };
+            Some(format!(
+                "Draw {} mL, {} units{out_of}",
+                format_volume(microlitres),
+                format_units(microlitres)
+            ))
+        })
+        .collect();
+    let short = shares
+        .iter()
+        .any(|&(vial, share)| share.is_some_and(|share| share > spare(store, id, vial)));
+    // Said rather than corrected: the rest of a part-drawn dose came from somewhere off the shelf.
+    let apportioned = shares
+        .iter()
+        .filter_map(|(_, share)| *share)
+        .fold(0_u32, u32::saturating_add);
+    let elsewhere = micrograms
+        .filter(|_| split && !unread)
+        .filter(|micrograms| *micrograms != apportioned);
 
     rsx! {
         div { class: "card",
@@ -1015,10 +1181,12 @@ fn DoseForm(id: Option<DoseId>) -> Element {
                         onclick: move |_| {
                             let given = (drug() != Some(option)).then_some(option);
                             drug.set(given);
-                            let held = from().and_then(|id| store.vial(id)).and_then(|(entry, _)| entry.drug);
-                            if held.is_some_and(|held| !fits(Some(held), given)) {
-                                from.set(None);
-                            }
+                            let mut list = picks();
+                            list.retain(|pick| {
+                                store.vial(pick.vial).is_none_or(|(entry, _)| fits(entry.drug, given))
+                            });
+                            lone_takes_it_all(&mut list);
+                            picks.set(list);
                         },
                         "{option.label()}"
                     }
@@ -1059,7 +1227,7 @@ fn DoseForm(id: Option<DoseId>) -> Element {
                         entry: entry.clone(),
                         // Straight onto the vial that was just made: mixing mid-dose is only
                         // ever done to draw from it.
-                        onmixed: move |vial| from.set(Some(vial)),
+                        onmixed: move |vial| picks.set(vec![DrawnDraft { vial, amount: String::new() }]),
                     }
                 } else if !mixable.is_empty() {
                     p { class: "note",
@@ -1076,45 +1244,125 @@ fn DoseForm(id: Option<DoseId>) -> Element {
                     }
                     button {
                         class: "btn block",
-                        onclick: move |_| nav.push(SubPage::AddStock),
+                        onclick: move |_| nav.push(SubPage::AddStock(drug())),
                         "Add vials to inventory"
                     }
                 }
             } else {
                 div { class: "chips",
                     button {
-                        class: if from().is_none() { "chip on" } else { "chip" },
-                        aria_pressed: "{from().is_none()}",
-                        onclick: move |_| from.set(None),
+                        class: if picked.is_empty() { "chip on" } else { "chip" },
+                        aria_pressed: "{picked.is_empty()}",
+                        onclick: move |_| picks.set(Vec::new()),
                         "Not from inventory"
                     }
-                    for (id , name) in choices.iter().cloned() {
+                    for (vial , name) in choices.iter().cloned() {
                         button {
-                            key: "{id:?}",
-                            class: if from() == Some(id) { "chip on" } else { "chip" },
-                            aria_pressed: "{from() == Some(id)}",
-                            onclick: move |_| from.set(Some(id)),
+                            key: "{vial:?}",
+                            class: if picked.iter().any(|pick| pick.vial == vial) { "chip on" } else { "chip" },
+                            aria_pressed: "{picked.iter().any(|pick| pick.vial == vial)}",
+                            onclick: move |_| {
+                                let mut list = picks();
+                                if let Some(at) = list.iter().position(|pick| pick.vial == vial) {
+                                    list.remove(at);
+                                } else {
+                                    list.push(DrawnDraft { vial, amount: String::new() });
+                                    apportion(
+                                        &mut list,
+                                        parse_mg(&strength()).unwrap_or_default(),
+                                        |vial| spare(store, id, vial),
+                                    );
+                                }
+                                lone_takes_it_all(&mut list);
+                                picks.set(list);
+                            },
                             "{name}"
                         }
                     }
                 }
-                if let Some((volume, short)) = drawn {
-                    if let Some(volume) = volume {
-                        p { class: "note", "{volume}" }
+                if split {
+                    p { class: "note",
+                        "How much of this dose came out of each. Atlas fills these in as the vials run down; change them where you drew it differently."
+                    }
+                    for (vial , name , amount) in picked
+                        .iter()
+                        .map(|pick| (pick.vial, vial_name(store, pick.vial), pick.amount.clone()))
+                    {
+                        div { key: "{vial:?}", class: "step",
+                            div { class: "row-main",
+                                span { class: "row-title", "{name}" }
+                            }
+                            input {
+                                class: "step-figure",
+                                r#type: "text",
+                                inputmode: "decimal",
+                                placeholder: "2.5",
+                                aria_label: "Milligrams drawn from {name}",
+                                value: "{amount}",
+                                oninput: move |event| {
+                                    let typed = event.value();
+                                    if let Some(pick) = picks.write().iter_mut().find(|pick| pick.vial == vial) {
+                                        pick.amount = typed;
+                                    }
+                                },
+                            }
+                            span { class: "step-unit", "mg" }
+                        }
+                    }
+                }
+                if picked.is_empty() {
+                    p { class: "note",
+                        "Saving takes nothing off the shelf. Pick a vial to draw this dose out of your stock, or two to split it between them."
+                    }
+                } else {
+                    if unread {
+                        p { class: "note",
+                            "An amount is a number of milligrams, such as 2.5."
+                        }
+                    }
+                    for (index , draw) in draws.iter().enumerate() {
+                        p { key: "{index}", class: "note", "{draw}" }
+                    }
+                    if let Some(micrograms) = elsewhere {
+                        p { class: "note caution",
+                            "These add up to {format_mg(apportioned)} mg and the dose above says {format_mg(micrograms)} mg. Atlas records both as you entered them."
+                        }
                     }
                     if short {
                         p { class: "note caution",
-                            "That is more than the vial has left. Atlas records the dose as you gave it and the vial as empty."
+                            if split {
+                                "That is more than one of these vials has left. Atlas records the dose as you gave it and the vial as empty."
+                            } else {
+                                "That is more than the vial has left. Atlas records the dose as you gave it and the vial as empty."
+                            }
+                        }
+                        if let Some(entry) = mixable.first().filter(|_| mixable.len() == 1) {
+                            p { class: "note",
+                                "{entry.sealed} sealed · {entry.name()}. Mix one here and Atlas draws the rest of this dose out of it."
+                            }
+                            MixControl {
+                                entry: entry.clone(),
+                                onmixed: move |vial| {
+                                    let mut list = picks();
+                                    list.push(DrawnDraft { vial, amount: String::new() });
+                                    apportion(
+                                        &mut list,
+                                        parse_mg(&strength()).unwrap_or_default(),
+                                        |vial| spare(store, id, vial),
+                                    );
+                                    picks.set(list);
+                                },
+                            }
                         }
                     }
                     if let Some(held) = mismatch {
                         p { class: "note caution",
-                            "This vial holds {held.label()}, and the dose above says something else. Atlas records both as you entered them."
+                            if split {
+                                "One of these vials holds {held.label()}, and the dose above says something else. Atlas records both as you entered them."
+                            } else {
+                                "This vial holds {held.label()}, and the dose above says something else. Atlas records both as you entered them."
+                            }
                         }
-                    }
-                } else if from().is_none() {
-                    p { class: "note",
-                        "Saving takes nothing off the shelf. Pick a vial to draw this dose out of your stock."
                     }
                 }
             }
@@ -1146,7 +1394,7 @@ fn DoseForm(id: Option<DoseId>) -> Element {
                     drug: drug(),
                     micrograms,
                     site: site(),
-                    from: from(),
+                    from: drawn_from(&on_shelf(store, &picks()), micrograms),
                     note: note().trim().to_owned(),
                 };
                 match id {
@@ -1216,6 +1464,127 @@ mod tests {
         assert!(fits(None, None));
     }
 
+    fn pick(vial: u64, amount: &str) -> DrawnDraft {
+        DrawnDraft {
+            vial: VialId::new(vial),
+            amount: amount.to_owned(),
+        }
+    }
+
+    fn drawn(vial: u64, micrograms: u32) -> Drawn {
+        Drawn {
+            vial: VialId::new(vial),
+            micrograms,
+        }
+    }
+
+    #[test]
+    fn a_second_vial_takes_what_the_first_one_could_not_cover() {
+        let mut picks = vec![pick(0, ""), pick(1, "")];
+        apportion(&mut picks, 5000, |vial| {
+            if vial == VialId::new(0) {
+                2300
+            } else {
+                30_000
+            }
+        });
+
+        assert_eq!(
+            picks[0].amount, "2.3",
+            "the vial running out gives its last"
+        );
+        assert_eq!(picks[1].amount, "2.7", "and the next one covers the rest");
+    }
+
+    #[test]
+    fn the_last_vial_picked_takes_the_rest_however_little_it_holds() {
+        let mut picks = vec![pick(0, ""), pick(1, "")];
+        apportion(&mut picks, 5000, |_| 0);
+
+        assert_eq!(
+            picks[0].amount, "",
+            "a vial with nothing left is asked for nothing"
+        );
+        assert_eq!(
+            picks[1].amount, "5",
+            "a dose is apportioned as it was given, not as the shelf can bear"
+        );
+    }
+
+    #[test]
+    fn a_share_that_was_typed_is_left_where_it_was_typed() {
+        let mut picks = vec![pick(0, "1"), pick(1, "")];
+        apportion(&mut picks, 5000, |_| 30_000);
+
+        assert_eq!(picks[0].amount, "1");
+        assert_eq!(picks[1].amount, "4", "the rest follows what was typed");
+    }
+
+    #[test]
+    fn a_dose_out_of_one_vial_is_the_whole_of_it_and_out_of_several_is_what_each_box_reads() {
+        assert_eq!(drawn_from(&[pick(0, "")], 5000), vec![drawn(0, 5000)]);
+        assert_eq!(
+            drawn_from(&[pick(0, "2.3"), pick(1, "2.7")], 5000),
+            vec![drawn(0, 2300), drawn(1, 2700)]
+        );
+        assert!(
+            drawn_from(&[], 5000).is_empty(),
+            "a dose out of no vial takes nothing off the shelf"
+        );
+    }
+
+    #[test]
+    fn a_share_that_is_not_a_figure_draws_out_of_nothing() {
+        assert_eq!(
+            drawn_from(&[pick(0, "2.3"), pick(1, "half")], 5000),
+            vec![drawn(0, 2300)]
+        );
+        assert_eq!(share("half"), None, "and is still nobody's figure to read");
+    }
+
+    /// The form is savable from here: an empty box is not something the user typed wrong, and
+    /// `parse_mg` refuses `0`, so there would be nothing they could type to clear it.
+    #[test]
+    fn a_second_vial_the_dose_did_not_reach_gave_nothing_rather_than_something_unreadable() {
+        let mut picks = vec![pick(0, "")];
+        lone_takes_it_all(&mut picks);
+        picks.push(pick(1, ""));
+        apportion(&mut picks, 5000, |_| 30_000);
+
+        assert_eq!(picks[0].amount, "5", "the first vial covers the whole dose");
+        assert_eq!(
+            picks[1].amount, "",
+            "leaving the second one nothing to give"
+        );
+        assert_eq!(share(&picks[1].amount), Some(0));
+        assert_eq!(
+            drawn_from(&picks, 5000),
+            vec![drawn(0, 5000)],
+            "and nothing to record against it"
+        );
+    }
+
+    #[test]
+    fn a_vial_with_nothing_left_is_asked_for_nothing_and_records_nothing() {
+        let mut picks = vec![pick(0, ""), pick(1, "")];
+        apportion(&mut picks, 5000, |vial| {
+            u32::from(vial == VialId::new(1)) * 30_000
+        });
+
+        assert_eq!(picks[0].amount, "");
+        assert_eq!(share(&picks[0].amount), Some(0));
+        assert_eq!(drawn_from(&picks, 5000), vec![drawn(1, 5000)]);
+    }
+
+    #[test]
+    fn a_dose_left_naming_one_vial_forgets_the_share_it_was_apportioned() {
+        let mut picks = vec![pick(0, "2.3")];
+        lone_takes_it_all(&mut picks);
+
+        assert_eq!(picks[0].amount, "");
+        assert_eq!(drawn_from(&picks, 5000), vec![drawn(0, 5000)]);
+    }
+
     fn unsaved(strength: &str) -> Unsaved {
         Unsaved {
             date: "2026-08-16".to_owned(),
@@ -1223,7 +1592,7 @@ mod tests {
             strength: strength.to_owned(),
             site: Site::LeftThigh,
             drug: Some(Drug::Tirzepatide),
-            from: None,
+            from: Vec::new(),
             note: String::new(),
         }
     }
@@ -1266,7 +1635,7 @@ mod tests {
     fn a_draft_survives_stepping_out_of_the_form_and_back() {
         drafting(
             SubPage::LogDose,
-            &[SubPage::AddStock],
+            &[SubPage::AddStock(None)],
             |mut nav, drafting| {
                 drafting.hold(None, unsaved("2.5"));
                 assert!(
@@ -1307,7 +1676,7 @@ mod tests {
         drafting(SubPage::LogDose, &[], |mut nav, drafting| {
             drafting.hold(None, unsaved("2.5"));
 
-            nav.push(SubPage::AddStock);
+            nav.push(SubPage::AddStock(None));
             drafting.expire(nav);
             nav.back();
             drafting.expire(nav);

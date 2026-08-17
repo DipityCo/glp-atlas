@@ -14,6 +14,7 @@ mod screens;
 mod sky;
 mod stock;
 mod store;
+mod stored;
 mod units;
 
 use dioxus::document;

@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::formulary::Drug;
 use crate::stock::StockId;
 use crate::store::DoseId;
 
@@ -59,7 +60,8 @@ pub enum SubPage {
     LogDose,
     EditDose(DoseId),
     Inventory,
-    AddStock,
+    /// Carries the drug to open the form on, where the page it was reached from knows one.
+    AddStock(Option<Drug>),
     StockDetail(StockId),
     EditStock(StockId),
     LogWeight,
@@ -75,7 +77,7 @@ impl SubPage {
             SubPage::LogDose => "Log a dose",
             SubPage::EditDose(_) => "Edit dose",
             SubPage::Inventory => "Inventory",
-            SubPage::AddStock => "Add to inventory",
+            SubPage::AddStock(_) => "Add to inventory",
             SubPage::StockDetail(_) => "Vials",
             SubPage::EditStock(_) => "Edit vials",
             SubPage::LogWeight => "Log weight",
@@ -91,7 +93,7 @@ impl SubPage {
             SubPage::LogDose => "Confirm the details",
             SubPage::EditDose(_) => "Change what was logged",
             SubPage::Inventory => "What you have on hand",
-            SubPage::AddStock => "Vials as they arrived",
+            SubPage::AddStock(_) => "Vials as they arrived",
             SubPage::StockDetail(_) => "Sealed, mixed, and what is left",
             SubPage::EditStock(_) => "Change what these are",
             SubPage::LogWeight => "Today's reading",

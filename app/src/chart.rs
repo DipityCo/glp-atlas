@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::formulary::Drug;
 use crate::kinetics::Sample;
-use crate::store::Clock;
+use crate::units::Clock;
 
 /// Several drugs share an axis of milligrams but never a line, since a milligram of one drug is
 /// not a milligram of another.

@@ -273,7 +273,7 @@ mod tests {
                         drug: Some(drug),
                         micrograms: *micrograms,
                         site: Site::LeftAbdomen,
-                        from: None,
+                        from: Vec::new(),
                         note: String::new(),
                     });
                 }
@@ -431,7 +431,7 @@ mod tests {
                         drug,
                         micrograms: 2500,
                         site: Site::LeftAbdomen,
-                        from: None,
+                        from: Vec::new(),
                         note: String::new(),
                     });
                 };
@@ -663,7 +663,7 @@ mod tests {
                 drug: Some(Drug::Semaglutide),
                 micrograms: 2500,
                 site: Site::LeftAbdomen,
-                from: None,
+                from: Vec::new(),
                 note: String::new(),
             };
             instant_of(&dose, origin)
