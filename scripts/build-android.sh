@@ -60,6 +60,12 @@ fi
 # target rustflags from .cargo/config.toml, so this goes through RUSTFLAGS.
 export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384"
 
+# dx builds from app/, where a relative target directory would resolve against a different
+# directory than the paths below, so pin it to the caller's.
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+[[ "$CARGO_TARGET_DIR" == /* ]] || CARGO_TARGET_DIR="$PWD/$CARGO_TARGET_DIR"
+export CARGO_TARGET_DIR
+
 echo "Profile: $PROFILE"
 echo "ANDROID_HOME=$ANDROID_HOME"
 echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
@@ -68,7 +74,7 @@ echo "JAVA_HOME=${JAVA_HOME:-<using java on PATH>}"
 # 1. Cross-compile the Rust .so and generate the base Android project.
 ( cd "$ROOT/app" && dx build --platform android "${DX_FLAGS[@]}" )
 
-GEN="$ROOT/app/target/dx/glp-atlas/$PROFILE/android/app"
+GEN="$CARGO_TARGET_DIR/dx/glp-atlas/$PROFILE/android/app"
 MAIN="$GEN/app/src/main"
 GRADLE="$GEN/app/build.gradle.kts"
 [ -d "$MAIN" ] || { echo "generated project not found at $MAIN" >&2; exit 1; }
