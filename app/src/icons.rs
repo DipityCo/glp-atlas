@@ -137,6 +137,29 @@ pub fn Pill(size: u32) -> Element {
 }
 
 #[component]
+pub fn Vial(size: u32) -> Element {
+    rsx! {
+        Constellation {
+            size,
+            outline: rsx! {
+                path { d: "M9 2.5h6" }
+                path { d: "M9.75 2.5v3.6" }
+                path { d: "M14.25 2.5v3.6" }
+                path {
+                    d: "M9.75 6.1 8.2 8.4a3 3 0 0 0-.7 1.9V19a2.5 2.5 0 0 0 2.5 2.5h4a2.5 2.5 0 0 0 2.5-2.5v-8.7a3 3 0 0 0-.7-1.9l-1.55-2.3",
+                }
+                path { d: "M7.5 13.5h9" }
+            },
+            stars: rsx! {
+                circle { cx: "16.5", cy: "19", r: M1 }
+                circle { cx: "8.2", cy: "8.4", r: M2 }
+                circle { cx: "7.5", cy: "13.5", r: M4 }
+            },
+        }
+    }
+}
+
+#[component]
 pub fn Ruler(size: u32) -> Element {
     rsx! {
         Constellation {

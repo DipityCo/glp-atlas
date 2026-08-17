@@ -9,16 +9,19 @@ use chrono::NaiveDate;
 use dioxus::document;
 use dioxus::prelude::*;
 
+use super::inventory::{vial_label, MixControl};
 use super::Row;
 use crate::chart::{self, Moved, PLOT};
 use crate::formulary::Drug;
-use crate::icons::{CalendarClock, Pill, Syringe};
+use crate::icons::{CalendarClock, Pill, Syringe, Vial as VialIcon};
 use crate::kinetics::{curve, instant_of, moment, on_board, spent, Given, Kinetics, Sample, TRACE};
 use crate::nav::{Nav, SubPage};
+use crate::stock::{Stock, VialId};
 use crate::store::{
-    format_mg, format_time, parse_mg, parse_time, rung, suggest_site, time_of_day, time_value,
-    today, Clock, Cycle, Dose, DoseId, Draft, Medication, Site, Status, Store, TitrationStep,
+    format_time, parse_time, rung, suggest_site, time_of_day, time_value, today, Clock, Cycle,
+    Dose, DoseId, Draft, Medication, Site, Status, Store, TitrationStep,
 };
+use crate::units::{format_level, format_mg, format_units, format_volume, parse_mg};
 
 /// Weekday, day and month: `Thursday 6 Aug`.
 fn long_date(date: NaiveDate) -> String {
@@ -36,6 +39,15 @@ fn day_label(date: NaiveDate, today: NaiveDate) -> String {
         0 => "Today".to_owned(),
         1 => "Yesterday".to_owned(),
         _ => long_date(date),
+    }
+}
+
+/// Whether a vial holding `held` can be the source of a dose given as `given`. A vial the
+/// formulary does not name could be anything, and a dose naming no drug contradicts nothing.
+fn fits(held: Option<Drug>, given: Option<Drug>) -> bool {
+    match (held, given) {
+        (Some(held), Some(given)) => held == given,
+        _ => true,
     }
 }
 
@@ -123,17 +135,6 @@ const TIMELINE_OPENS: f64 = -2.0;
 /// The shortest the value axis will run to, in micrograms. Ten times the level a curve is
 /// followed down to, so a window past the end of a drug is ruled at figures that read as nothing.
 const AXIS_FLOOR: f64 = TRACE * 10.0;
-
-/// A modelled amount, in milligrams. Two decimals below a milligram and one above: the model
-/// does not support reading it any finer than that.
-fn format_level(micrograms: f64) -> String {
-    let mg = micrograms / 1000.0;
-    if mg >= 1.0 {
-        format!("{mg:.1}")
-    } else {
-        format!("{mg:.2}")
-    }
-}
 
 /// The doses the plan says are still to come, from the last one logged out to `horizon`.
 ///
@@ -527,6 +528,14 @@ pub fn DosesPage() -> Element {
         (None, _) => "Not set up yet".to_owned(),
     };
 
+    let (sealed, open) = store.supply();
+    let supply = match (sealed, open) {
+        (0, 0) => "Nothing on the shelf".to_owned(),
+        (sealed, 0) => format!("{sealed} sealed"),
+        (0, open) => format!("{open} in use"),
+        (sealed, open) => format!("{sealed} sealed · {open} in use"),
+    };
+
     rsx! {
         if let Some(last) = log.first() {
             CycleCard { last: last.clone(), today, interval }
@@ -585,6 +594,12 @@ pub fn DosesPage() -> Element {
 
         div { class: "card flush",
             Row {
+                icon: rsx! { VialIcon { size: 20 } },
+                title: "Inventory",
+                sub: "{supply}",
+                target: SubPage::Inventory,
+            }
+            Row {
                 icon: rsx! { CalendarClock { size: 20 } },
                 title: "Titration schedule",
                 sub: "{schedule}",
@@ -631,6 +646,15 @@ pub fn DoseDetailPage(id: DoseId) -> Element {
         Some(drug) => drug.label().to_owned(),
         None => "No drug set".to_owned(),
     };
+    let source = dose
+        .from
+        .and_then(|id| store.vial(id))
+        .map(|(entry, vial)| {
+            let volume = vial.draw(dose.micrograms).map_or_else(String::new, |ul| {
+                format!(" · {} mL, {} units", format_volume(ul), format_units(ul))
+            });
+            format!("{}{volume}", entry.name())
+        });
 
     rsx! {
         div { class: "card hero",
@@ -658,6 +682,13 @@ pub fn DoseDetailPage(id: DoseId) -> Element {
                     span { class: "stat-value", "{change}" }
                     span { class: "stat-label", "Strength" }
                 }
+            }
+        }
+
+        if let Some(source) = source {
+            div { class: "card tight",
+                h2 { class: "card-title", "Drawn from" }
+                p { class: "note", "{source}" }
             }
         }
 
@@ -706,12 +737,81 @@ pub fn EditDosePage(id: DoseId) -> Element {
     }
 }
 
+/// Raw text rather than read figures, so a strength typed half way comes back half way.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Unsaved {
+    pub date: String,
+    pub time: String,
+    pub strength: String,
+    pub site: Site,
+    pub drug: Option<Drug>,
+    pub from: Option<VialId>,
+    pub note: String,
+}
+
+/// The dose being entered, owned above the form because stepping out to mix or add a vial
+/// unmounts it. Lasts while that form is still somewhere in the stack.
+///
+/// Reads peek rather than subscribe, or the form writing on every keystroke would set itself
+/// re-rendering without end.
+#[derive(Clone, Copy)]
+pub struct Drafting {
+    held: Signal<Option<(Option<DoseId>, Unsaved)>>,
+}
+
+impl Drafting {
+    pub fn new() -> Self {
+        Self {
+            held: Signal::new(None),
+        }
+    }
+
+    fn form(dose: Option<DoseId>) -> SubPage {
+        dose.map_or(SubPage::LogDose, SubPage::EditDose)
+    }
+
+    fn hold(mut self, dose: Option<DoseId>, unsaved: Unsaved) {
+        let next = Some((dose, unsaved));
+        if *self.held.peek() != next {
+            self.held.set(next);
+        }
+    }
+
+    /// Driven from an effect on navigation, so a form abandoned and opened again starts clean.
+    pub fn expire(mut self, nav: Nav) {
+        // Read unconditionally: an effect run that skipped navigation is never woken again.
+        let open = nav.open();
+        let form = self.held.peek().as_ref().map(|(dose, _)| Self::form(*dose));
+        if form.is_some_and(|form| !open.contains(&form)) {
+            self.held.set(None);
+        }
+    }
+
+    fn held(self, nav: Nav, dose: Option<DoseId>) -> Option<Unsaved> {
+        if !nav.holds(Self::form(dose)) {
+            return None;
+        }
+        self.held
+            .peek()
+            .as_ref()
+            .filter(|(target, _)| *target == dose)
+            .map(|(_, unsaved)| unsaved.clone())
+    }
+}
+
+impl Default for Drafting {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The form behind both logging and editing. `id` names the dose being rewritten; without one
 /// the form adds a dose to the log. Nothing is saved until the button is pressed.
 #[component]
 fn DoseForm(id: Option<DoseId>) -> Element {
     let mut nav = use_context::<Nav>();
     let mut store = use_context::<Store>();
+    let drafting = use_context::<Drafting>();
 
     let log = store.all();
     let existing = id.and_then(|id| store.get(id));
@@ -742,22 +842,119 @@ fn DoseForm(id: Option<DoseId>) -> Element {
         },
         |dose| dose.drug,
     );
-    let default_note = existing.map_or_else(String::new, |dose| dose.note);
+    let default_note = existing
+        .as_ref()
+        .map_or_else(String::new, |dose| dose.note.clone());
 
-    let mut date = use_signal(move || default_date.format("%Y-%m-%d").to_string());
+    let vials = store.open_vials();
+    // Exactly one, or none: deducting from the wrong vial is a figure nobody asked for.
+    let sole_match = || {
+        let mut matching = vials
+            .iter()
+            .filter(|(entry, _)| entry.drug.is_some() && entry.drug == default_drug);
+        matching
+            .next()
+            .filter(|_| matching.next().is_none())
+            .map(|(_, vial)| vial.id)
+    };
+    let default_from = existing.as_ref().map_or_else(sole_match, |dose| dose.from);
+
+    // Where the form was stepped out of to mix or add a vial, it opens on what it was left
+    // holding rather than on the defaults above.
+    let held = drafting.held(nav, id);
+    let start_date = held.as_ref().map_or_else(
+        || default_date.format("%Y-%m-%d").to_string(),
+        |unsaved| unsaved.date.clone(),
+    );
     // The clock setting stops here: the control both reports and expects 24-hour whatever face the
     // platform draws it with.
-    let mut time = use_signal(move || default_time.map(time_value).unwrap_or_default());
-    let mut strength = use_signal(move || default_strength.unwrap_or_default());
-    let mut site = use_signal(move || default_site);
-    let mut drug = use_signal(move || default_drug);
-    let mut note = use_signal(move || default_note);
+    let start_time = held.as_ref().map_or_else(
+        || default_time.map(time_value).unwrap_or_default(),
+        |unsaved| unsaved.time.clone(),
+    );
+    let start_strength = held.as_ref().map_or_else(
+        || default_strength.unwrap_or_default(),
+        |unsaved| unsaved.strength.clone(),
+    );
+    let start_site = held.as_ref().map_or(default_site, |unsaved| unsaved.site);
+    let start_drug = held.as_ref().map_or(default_drug, |unsaved| unsaved.drug);
+    let start_from = held.as_ref().map_or(default_from, |unsaved| unsaved.from);
+    let start_note = held.map_or(default_note, |unsaved| unsaved.note);
+
+    let mut date = use_signal(move || start_date);
+    let mut time = use_signal(move || start_time);
+    let mut strength = use_signal(move || start_strength);
+    let mut site = use_signal(move || start_site);
+    let mut drug = use_signal(move || start_drug);
+    let mut note = use_signal(move || start_note);
+    let mut from = use_signal(move || start_from);
+
+    // Reads every box, so it runs again on every keystroke and the form is always held as it
+    // stands. Stepping out to the inventory remounts this component; this outlives it.
+    use_effect(move || {
+        drafting.hold(
+            id,
+            Unsaved {
+                date: date(),
+                time: time(),
+                strength: strength(),
+                site: site(),
+                drug: drug(),
+                from: from(),
+                note: note(),
+            },
+        );
+    });
 
     let taken = NaiveDate::parse_from_str(&date(), "%Y-%m-%d").ok();
     let hour = parse_time(&time());
     let micrograms = parse_mg(&strength());
     let mistyped = micrograms.is_none() && !strength().trim().is_empty();
     let ready = taken.is_some() && micrograms.is_some();
+
+    // Vials that could hold this dose, and whichever is picked whether it could or not: one
+    // recorded before the drug was changed still has to be visible to be unpicked.
+    let choices: Vec<(VialId, String)> = vials
+        .iter()
+        .filter(|(entry, vial)| fits(entry.drug, drug()) || from() == Some(vial.id))
+        .map(|(entry, vial)| (vial.id, vial_label(store, entry, vial)))
+        .collect();
+
+    // Sealed vials this dose could have come from, where none is mixed yet. Mixing happens here
+    // rather than on the Inventory page: leaving the form would remount it and lose what has
+    // been entered so far.
+    let mixable: Vec<Stock> = store
+        .stock()
+        .into_iter()
+        .filter(|entry| entry.sealed > 0 && fits(entry.drug, drug()))
+        .collect();
+
+    let mismatch = from()
+        .and_then(|id| store.vial(id))
+        .and_then(|(entry, _)| entry.drug)
+        .filter(|held| drug().is_some_and(|given| given != *held));
+
+    let drawn =
+        from()
+            .and_then(|id| store.vial(id))
+            .zip(micrograms)
+            .map(|((_, vial), micrograms)| {
+                let volume = vial.draw(micrograms).map(|microlitres| {
+                    format!(
+                        "Draw {} mL, {} units",
+                        format_volume(microlitres),
+                        format_units(microlitres)
+                    )
+                });
+                // This dose's own draw is already counted against the vial; put it back before
+                // asking whether the new strength fits.
+                let returned = existing
+                    .as_ref()
+                    .filter(|dose| dose.from == Some(vial.id))
+                    .map_or(0, |dose| dose.micrograms);
+                let short = micrograms > store.remaining(&vial).saturating_add(returned);
+                (volume, short)
+            });
 
     rsx! {
         div { class: "card",
@@ -811,7 +1008,14 @@ fn DoseForm(id: Option<DoseId>) -> Element {
                         aria_pressed: "{drug() == Some(option)}",
                         // Tapping the chosen drug again unsets it: the only way back to a dose
                         // with no drug on it.
-                        onclick: move |_| drug.set((drug() != Some(option)).then_some(option)),
+                        onclick: move |_| {
+                            let given = (drug() != Some(option)).then_some(option);
+                            drug.set(given);
+                            let held = from().and_then(|id| store.vial(id)).and_then(|(entry, _)| entry.drug);
+                            if held.is_some_and(|held| !fits(Some(held), given)) {
+                                from.set(None);
+                            }
+                        },
                         "{option.label()}"
                     }
                 }
@@ -837,6 +1041,78 @@ fn DoseForm(id: Option<DoseId>) -> Element {
             }
             if !log.is_empty() {
                 p { class: "note", "Atlas opens on the site you have gone longest without using." }
+            }
+        }
+
+        div { class: "card tight",
+            h2 { class: "card-title", "Drawn from" }
+            if choices.is_empty() {
+                if let Some(entry) = mixable.first().filter(|_| mixable.len() == 1) {
+                    p { class: "note",
+                        "{entry.sealed} sealed · {entry.name()}. Mix one here and this dose comes out of it; the log stays as you have it."
+                    }
+                    MixControl {
+                        entry: entry.clone(),
+                        // Straight onto the vial that was just made: mixing mid-dose is only
+                        // ever done to draw from it.
+                        onmixed: move |vial| from.set(Some(vial)),
+                    }
+                } else if !mixable.is_empty() {
+                    p { class: "note",
+                        "Nothing is mixed yet, and more than one group could be. Pick which on the Inventory page."
+                    }
+                    button {
+                        class: "btn block",
+                        onclick: move |_| nav.push(SubPage::Inventory),
+                        "Open the inventory"
+                    }
+                } else {
+                    p { class: "note",
+                        "Nothing on the shelf this dose could have come from. Adding some keeps this form as you have it."
+                    }
+                    button {
+                        class: "btn block",
+                        onclick: move |_| nav.push(SubPage::AddStock),
+                        "Add vials to inventory"
+                    }
+                }
+            } else {
+                div { class: "chips",
+                    button {
+                        class: if from().is_none() { "chip on" } else { "chip" },
+                        aria_pressed: "{from().is_none()}",
+                        onclick: move |_| from.set(None),
+                        "Not from inventory"
+                    }
+                    for (id , name) in choices.iter().cloned() {
+                        button {
+                            key: "{id:?}",
+                            class: if from() == Some(id) { "chip on" } else { "chip" },
+                            aria_pressed: "{from() == Some(id)}",
+                            onclick: move |_| from.set(Some(id)),
+                            "{name}"
+                        }
+                    }
+                }
+                if let Some((volume, short)) = drawn {
+                    if let Some(volume) = volume {
+                        p { class: "note", "{volume}" }
+                    }
+                    if short {
+                        p { class: "note caution",
+                            "That is more than the vial has left. Atlas records the dose as you gave it and the vial as empty."
+                        }
+                    }
+                    if let Some(held) = mismatch {
+                        p { class: "note caution",
+                            "This vial holds {held.label()}, and the dose above says something else. Atlas records both as you entered them."
+                        }
+                    }
+                } else if from().is_none() {
+                    p { class: "note",
+                        "Saving takes nothing off the shelf. Pick a vial to draw this dose out of your stock."
+                    }
+                }
             }
         }
 
@@ -866,6 +1142,7 @@ fn DoseForm(id: Option<DoseId>) -> Element {
                     drug: drug(),
                     micrograms,
                     site: site(),
+                    from: from(),
                     note: note().trim().to_owned(),
                 };
                 match id {
@@ -884,6 +1161,7 @@ fn DoseForm(id: Option<DoseId>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nav::Page;
 
     fn date(text: &str) -> NaiveDate {
         NaiveDate::parse_from_str(text, "%Y-%m-%d").expect("a date the test wrote")
@@ -908,5 +1186,169 @@ mod tests {
         assert_eq!(strength_change(1700, 2500), "+0.8 mg");
         assert_eq!(strength_change(2500, 1700), "−0.8 mg");
         assert_eq!(strength_change(2500, 2500), "Same");
+    }
+
+    #[test]
+    fn a_vial_holds_a_dose_only_where_the_two_name_the_same_drug() {
+        use Drug::{Semaglutide, Tirzepatide};
+
+        assert!(fits(Some(Tirzepatide), Some(Tirzepatide)));
+        assert!(
+            !fits(Some(Semaglutide), Some(Tirzepatide)),
+            "one drug was not drawn out of another"
+        );
+    }
+
+    #[test]
+    fn a_vial_or_a_dose_naming_no_drug_contradicts_nothing() {
+        assert!(
+            fits(None, Some(Drug::Tirzepatide)),
+            "a vial Atlas cannot name"
+        );
+        assert!(
+            fits(Some(Drug::Tirzepatide), None),
+            "a dose with no drug set"
+        );
+        assert!(fits(None, None));
+    }
+
+    fn unsaved(strength: &str) -> Unsaved {
+        Unsaved {
+            date: "2026-08-16".to_owned(),
+            time: "07:30".to_owned(),
+            strength: strength.to_owned(),
+            site: Site::LeftThigh,
+            drug: Some(Drug::Tirzepatide),
+            from: None,
+            note: String::new(),
+        }
+    }
+
+    fn drafting(form: SubPage, over: &[SubPage], f: impl FnOnce(Nav, Drafting)) {
+        let dom = VirtualDom::new(|| rsx! { div {} });
+        dom.in_runtime(|| {
+            dioxus::core::Runtime::current().in_scope(ScopeId::ROOT, || {
+                let mut nav = Nav::new();
+                nav.push(form);
+                for sub in over {
+                    nav.push(*sub);
+                }
+                f(nav, Drafting::new());
+            });
+        });
+    }
+
+    #[test]
+    fn a_form_that_was_never_left_holds_nothing() {
+        drafting(SubPage::LogDose, &[], |nav, drafting| {
+            assert_eq!(drafting.held(nav, None), None);
+        });
+    }
+
+    #[test]
+    fn what_was_typed_comes_back_as_it_was_typed() {
+        drafting(SubPage::LogDose, &[], |nav, drafting| {
+            drafting.hold(None, unsaved("2."));
+
+            let back = drafting
+                .held(nav, None)
+                .expect("the form was left part-way");
+            assert_eq!(back.strength, "2.", "a figure that is not yet a figure");
+            assert_eq!(back, unsaved("2."));
+        });
+    }
+
+    #[test]
+    fn a_draft_survives_stepping_out_of_the_form_and_back() {
+        drafting(
+            SubPage::LogDose,
+            &[SubPage::AddStock],
+            |mut nav, drafting| {
+                drafting.hold(None, unsaved("2.5"));
+                assert!(
+                    drafting.held(nav, None).is_some(),
+                    "the form is still open under the one stepped into"
+                );
+
+                nav.back();
+                assert_eq!(
+                    drafting.held(nav, None).map(|u| u.strength),
+                    Some("2.5".to_owned())
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn leaving_the_form_discards_it_without_anyone_saying_so() {
+        drafting(SubPage::LogDose, &[], |mut nav, drafting| {
+            drafting.hold(None, unsaved("2.5"));
+
+            nav.back();
+            drafting.expire(nav);
+            assert_eq!(drafting.held(nav, None), None, "the form is gone");
+
+            nav.push(SubPage::LogDose);
+            drafting.expire(nav);
+            assert_eq!(
+                drafting.held(nav, None),
+                None,
+                "and opening it again starts clean"
+            );
+        });
+    }
+
+    #[test]
+    fn stepping_out_of_the_form_does_not_expire_the_draft() {
+        drafting(SubPage::LogDose, &[], |mut nav, drafting| {
+            drafting.hold(None, unsaved("2.5"));
+
+            nav.push(SubPage::AddStock);
+            drafting.expire(nav);
+            nav.back();
+            drafting.expire(nav);
+
+            assert_eq!(
+                drafting.held(nav, None).map(|u| u.strength),
+                Some("2.5".to_owned())
+            );
+        });
+    }
+
+    #[test]
+    fn a_draft_outlives_a_look_at_another_page() {
+        drafting(SubPage::LogDose, &[], |mut nav, drafting| {
+            drafting.hold(None, unsaved("2.5"));
+
+            nav.go(Page::Profile);
+            drafting.expire(nav);
+            nav.go(Page::Doses);
+            drafting.expire(nav);
+
+            assert_eq!(
+                drafting.held(nav, None).map(|u| u.strength),
+                Some("2.5".to_owned()),
+                "the form was still open the whole time"
+            );
+        });
+    }
+
+    #[test]
+    fn a_draft_is_never_restored_onto_a_different_dose() {
+        let three = DoseId::new(3);
+        drafting(SubPage::EditDose(three), &[], |nav, drafting| {
+            drafting.hold(Some(three), unsaved("2.5"));
+
+            assert_eq!(
+                drafting.held(nav, Some(three)).map(|u| u.strength),
+                Some("2.5".to_owned())
+            );
+            assert_eq!(
+                drafting.held(nav, Some(DoseId::new(4))),
+                None,
+                "another dose"
+            );
+            assert_eq!(drafting.held(nav, None), None, "nor a new one");
+        });
     }
 }

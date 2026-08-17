@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::stock::StockId;
 use crate::store::DoseId;
 
 /// Top-level destinations, ordered left to right across the field.
@@ -50,13 +51,17 @@ pub enum Direction {
 
 /// A page stacked on top of a [`Page`].
 ///
-/// The dose pages carry a [`DoseId`] rather than a position in the log, so a stack left standing
-/// while the log changes underneath it still names the dose it was opened on.
+/// The dose and inventory pages carry an id rather than a position in a list, so a stack left
+/// standing while the records change underneath it still names what it was opened on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SubPage {
     DoseDetail(DoseId),
     LogDose,
     EditDose(DoseId),
+    Inventory,
+    AddStock,
+    StockDetail(StockId),
+    EditStock(StockId),
     LogWeight,
     Measurements,
     Medication,
@@ -69,6 +74,10 @@ impl SubPage {
             SubPage::DoseDetail(_) => "Dose",
             SubPage::LogDose => "Log a dose",
             SubPage::EditDose(_) => "Edit dose",
+            SubPage::Inventory => "Inventory",
+            SubPage::AddStock => "Add to inventory",
+            SubPage::StockDetail(_) => "Vials",
+            SubPage::EditStock(_) => "Edit vials",
             SubPage::LogWeight => "Log weight",
             SubPage::Measurements => "Measurements",
             SubPage::Medication => "Medication",
@@ -81,6 +90,10 @@ impl SubPage {
             SubPage::DoseDetail(_) => "What was taken, and when",
             SubPage::LogDose => "Confirm the details",
             SubPage::EditDose(_) => "Change what was logged",
+            SubPage::Inventory => "What you have on hand",
+            SubPage::AddStock => "Vials as they arrived",
+            SubPage::StockDetail(_) => "Sealed, mixed, and what is left",
+            SubPage::EditStock(_) => "Change what these are",
             SubPage::LogWeight => "Today's reading",
             SubPage::Measurements => "Waist, chest, hips",
             SubPage::Medication => "Drug, strength, schedule",
@@ -159,6 +172,16 @@ impl Nav {
     /// Index of the current page's sub-page stack.
     fn slot(self) -> usize {
         usize::from(self.page().index())
+    }
+
+    /// Every sub-page open anywhere. A page keeps its stack while another is looked at, so
+    /// what is open is not only what is on screen.
+    pub fn open(self) -> Vec<SubPage> {
+        self.stacks.read().iter().flatten().copied().collect()
+    }
+
+    pub fn holds(self, sub: SubPage) -> bool {
+        self.open().contains(&sub)
     }
 
     pub fn top(self) -> Option<SubPage> {

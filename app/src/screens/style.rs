@@ -689,7 +689,8 @@ body {
   box-shadow: 0 12px 28px rgba(111, 146, 224, 0.32);
 }
 /* Armed for a destructive tap. */
-.btn.warn {
+.btn.warn,
+.chip.warn {
   border-color: rgba(242, 196, 141, 0.45);
   background: rgba(242, 196, 141, 0.16);
   color: var(--warm);

@@ -11,7 +11,8 @@ use super::Row;
 use crate::formulary::Drug;
 use crate::icons::{ArrowRight, Bell, Check, Cross, Pill};
 use crate::nav::SubPage;
-use crate::store::{format_mg, parse_mg, rung, today, Clock, Store, TitrationStep};
+use crate::store::{rung, today, Clock, Store, TitrationStep};
+use crate::units::{format_mg, parse_mg};
 
 /// The days a weekly dose can fall on, from the start of the week.
 const WEEK: [Weekday; 7] = [
