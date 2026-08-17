@@ -22,6 +22,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      # `git_only` versioning diffs the crate against its last tag by running
+      # `cargo package`, whose verification step builds the crate for the host.
+      - uses: ./.github/actions/webkitgtk-deps
+
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache: false
