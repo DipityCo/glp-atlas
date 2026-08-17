@@ -639,10 +639,26 @@ impl Store {
         self.clock.set(clock);
     }
 
+    /// Deletes the log, the shelf, the medication record and the clock setting.
+    pub fn wipe(&mut self) {
+        self.doses.set(Vec::new());
+        self.stock.set(Vec::new());
+        self.medication.set(Medication::default());
+        self.clock.set(Clock::default());
+        // Even from `Unreadable`: a document that could not be read is still deleted on request.
+        self.status.set(Status::Ready);
+    }
+
     /// Once, at startup.
     async fn hydrate(mut self) {
         let mut eval = document::eval(READ);
-        let status = match eval.recv::<Fetched>().await {
+        let fetched = eval.recv::<Fetched>().await;
+        // A wipe while the read was in flight has already settled the records; installing the
+        // document it deleted would undo it.
+        if self.status() != Status::Loading {
+            return;
+        }
+        let status = match fetched {
             Ok(Fetched {
                 ok: true,
                 raw: None,
@@ -683,24 +699,29 @@ impl Store {
         self.stock.set(stock);
     }
 
-    /// Silent unless the stored log has been read: an empty starting log must not land on top of
-    /// one, and a log this build cannot parse must not be replaced by one it can.
-    fn persist(self, writer: Coroutine<String>) {
+    /// The document to write back, or `None` while there is nothing to put over the stored one:
+    /// an empty starting log must not land on top of one, and a log this build cannot parse must
+    /// not be replaced by one it can.
+    fn document(self) -> Option<String> {
         if self.status() != Status::Ready {
-            return;
+            return None;
         }
         let doses = self.doses.read();
         let medication = self.medication.read();
-        let Ok(payload) = serde_json::to_string(&Writing {
+        serde_json::to_string(&Writing {
             version: VERSION,
             doses: &doses,
             stock: self.stock.read().iter().map(Into::into).collect(),
             medication: &medication,
             clock: *self.clock.read(),
-        }) else {
-            return;
-        };
-        writer.send(payload);
+        })
+        .ok()
+    }
+
+    fn persist(self, writer: Coroutine<String>) {
+        if let Some(document) = self.document() {
+            writer.send(document);
+        }
     }
 }
 
@@ -779,6 +800,68 @@ mod tests {
 
             store.set_clock(Clock::TwelveHour);
             assert_eq!(store.clock(), Clock::TwelveHour);
+        });
+    }
+
+    #[test]
+    fn a_wipe_leaves_nothing_of_the_records_or_the_settings() {
+        store(|mut store| {
+            store.add(draft("2026-08-06", 2500, Site::LeftAbdomen));
+            store.add_stock(vials(30_000, 4));
+            store.set_medication(Medication {
+                drug: Some(Drug::Semaglutide),
+                ..Medication::default()
+            });
+            store.set_clock(Clock::TwelveHour);
+
+            store.wipe();
+
+            assert!(store.all().is_empty());
+            assert!(store.stock().is_empty());
+            assert_eq!(store.medication(), Medication::default());
+            assert_eq!(store.clock(), Clock::default());
+        });
+    }
+
+    #[test]
+    fn nothing_is_written_back_before_the_stored_document_has_been_read() {
+        store(|store| {
+            assert_eq!(store.document(), None);
+        });
+    }
+
+    /// The document a wipe leaves behind is the one that lands on the device, so what it carries
+    /// is what survives a restart.
+    #[test]
+    fn a_wipe_writes_back_a_document_holding_nothing_even_over_an_unreadable_one() {
+        store(|mut store| {
+            store.add(draft("2026-08-06", 2500, Site::LeftAbdomen));
+            store.add_stock(vials(30_000, 4));
+            store.set_clock(Clock::TwelveHour);
+            store.status.set(Status::Unreadable);
+
+            store.wipe();
+
+            let document = store.document().expect("a wipe is written back");
+            let read: Reading = serde_json::from_str(&document).expect("and reads back");
+            assert_eq!(read.version, VERSION);
+            assert!(read.doses.is_empty());
+            assert!(read.stock.is_empty());
+            assert_eq!(read.medication, Medication::default());
+            assert_eq!(read.clock, Clock::default());
+        });
+    }
+
+    #[test]
+    fn an_id_minted_before_a_wipe_names_no_dose_logged_after_one() {
+        store(|mut store| {
+            let gone = store.add(draft("2026-08-06", 2500, Site::LeftAbdomen));
+
+            store.wipe();
+            let logged = store.add(draft("2026-08-13", 2500, Site::LeftThigh));
+
+            assert_ne!(logged, gone);
+            assert_eq!(store.get(gone), None);
         });
     }
 
@@ -993,17 +1076,11 @@ mod tests {
                 ],
             });
             store.set_clock(Clock::TwelveHour);
+            store.status.set(Status::Ready);
             let doses = store.all();
             let medication = store.medication();
 
-            let payload = serde_json::to_string(&Writing {
-                version: VERSION,
-                doses: &doses,
-                stock: Vec::new(),
-                medication: &medication,
-                clock: store.clock(),
-            })
-            .expect("the document serialises");
+            let payload = store.document().expect("the document serialises");
             let read: Reading = serde_json::from_str(&payload).expect("and reads back");
 
             assert_eq!(read.version, VERSION);

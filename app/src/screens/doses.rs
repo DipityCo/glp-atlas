@@ -706,6 +706,7 @@ pub fn DoseDetailPage(id: DoseId) -> Element {
         }
         button {
             class: if arming() { "btn block warn" } else { "btn block" },
+            aria_describedby: arming().then_some("dose-delete-warning"),
             onclick: move |_| {
                 if arming() {
                     store.remove(id);
@@ -715,6 +716,9 @@ pub fn DoseDetailPage(id: DoseId) -> Element {
                 }
             },
             if arming() { "Tap again to delete" } else { "Delete this dose" }
+        }
+        if arming() {
+            p { id: "dose-delete-warning", class: "note caution", "This cannot be undone." }
         }
     }
 }
