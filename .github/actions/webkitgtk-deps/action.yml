@@ -1,0 +1,17 @@
+name: Install the WebKitGTK build dependencies
+description: >-
+  Installs the system libraries that `dioxus/mobile` needs to build for a Linux
+  host, since it pulls in dioxus-desktop, and through it wry and tao.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends -y \
+          libgtk-3-dev \
+          libwebkit2gtk-4.1-dev \
+          libjavascriptcoregtk-4.1-dev \
+          libsoup-3.0-dev \
+          libxdo-dev
