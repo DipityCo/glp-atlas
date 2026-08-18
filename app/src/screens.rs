@@ -114,7 +114,7 @@ pub fn Body() -> Element {
         Some(SubPage::LogDose) => rsx! { doses::LogDosePage {} },
         Some(SubPage::EditDose(id)) => rsx! { doses::EditDosePage { id } },
         Some(SubPage::Inventory) => rsx! { inventory::InventoryPage {} },
-        Some(SubPage::AddStock) => rsx! { inventory::AddStockPage {} },
+        Some(SubPage::AddStock(drug)) => rsx! { inventory::AddStockPage { drug } },
         Some(SubPage::StockDetail(id)) => rsx! { inventory::StockDetailPage { id } },
         Some(SubPage::EditStock(id)) => rsx! { inventory::EditStockPage { id } },
         Some(SubPage::LogWeight) => rsx! { progress::LogWeightPage {} },

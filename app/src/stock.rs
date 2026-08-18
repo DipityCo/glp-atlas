@@ -1,5 +1,5 @@
-//! The supply record: groups of vials, the ones in use, and the shape all of it takes on the
-//! device. [`crate::store`] owns identity, grouping and storage.
+//! The supply record: groups of vials and the ones in use. [`crate::store`] owns identity and
+//! grouping, [`crate::stored`] the shape all of it takes on the device.
 
 use chrono::NaiveDate;
 
@@ -108,117 +108,6 @@ pub struct StockDraft {
     pub note: String,
 }
 
-/// The shape the shelf takes on the device. Frozen: add a `v2` beside `v1` and convert, rather
-/// than editing `v1`, which is already on people's devices.
-pub mod stored {
-    use super::{Form, Stock, StockId, Vial, VialId};
-
-    pub mod v1 {
-        use chrono::NaiveDate;
-        use serde::{Deserialize, Serialize};
-
-        use crate::formulary::Drug;
-
-        #[derive(Serialize, Deserialize)]
-        pub enum Form {
-            Lyophilized,
-            Solution { microlitres: u32 },
-        }
-
-        #[derive(Serialize, Deserialize)]
-        pub struct Vial {
-            pub id: u64,
-            pub micrograms: u32,
-            pub microlitres: u32,
-            pub opened: NaiveDate,
-        }
-
-        #[derive(Serialize, Deserialize)]
-        pub struct Stock {
-            pub id: u64,
-            /// [`Drug`] itself, not a copy: the formulary already treats its variant names as
-            /// names on the device.
-            pub drug: Option<Drug>,
-            pub label: String,
-            pub micrograms: u32,
-            pub form: Form,
-            pub sealed: u32,
-            pub open: Vec<Vial>,
-            pub note: String,
-        }
-    }
-
-    impl From<Form> for v1::Form {
-        fn from(form: Form) -> Self {
-            match form {
-                Form::Lyophilized => v1::Form::Lyophilized,
-                Form::Solution { microlitres } => v1::Form::Solution { microlitres },
-            }
-        }
-    }
-
-    impl From<v1::Form> for Form {
-        fn from(form: v1::Form) -> Self {
-            match form {
-                v1::Form::Lyophilized => Form::Lyophilized,
-                v1::Form::Solution { microlitres } => Form::Solution { microlitres },
-            }
-        }
-    }
-
-    impl From<&Vial> for v1::Vial {
-        fn from(vial: &Vial) -> Self {
-            v1::Vial {
-                id: vial.id.0,
-                micrograms: vial.micrograms,
-                microlitres: vial.microlitres,
-                opened: vial.opened,
-            }
-        }
-    }
-
-    impl From<v1::Vial> for Vial {
-        fn from(vial: v1::Vial) -> Self {
-            Vial {
-                id: VialId(vial.id),
-                micrograms: vial.micrograms,
-                microlitres: vial.microlitres,
-                opened: vial.opened,
-            }
-        }
-    }
-
-    impl From<&Stock> for v1::Stock {
-        fn from(entry: &Stock) -> Self {
-            v1::Stock {
-                id: entry.id.0,
-                drug: entry.drug,
-                label: entry.label.clone(),
-                micrograms: entry.micrograms,
-                form: entry.form.into(),
-                sealed: entry.sealed,
-                open: entry.open.iter().map(v1::Vial::from).collect(),
-                note: entry.note.clone(),
-            }
-        }
-    }
-
-    impl From<v1::Stock> for Stock {
-        fn from(entry: v1::Stock) -> Self {
-            Stock {
-                id: StockId(entry.id),
-                drug: entry.drug,
-                label: entry.label,
-                micrograms: entry.micrograms,
-                form: entry.form.into(),
-                sealed: entry.sealed,
-                open: entry.open.into_iter().map(Vial::from).collect(),
-                note: entry.note,
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,71 +180,6 @@ mod tests {
             ..vial()
         };
         assert_eq!(empty.draw(2500), None);
-    }
-
-    fn shelf() -> Stock {
-        Stock {
-            id: StockId::new(3),
-            drug: Some(Drug::Tirzepatide),
-            label: "Batch B".to_owned(),
-            micrograms: 30_000,
-            form: Form::Lyophilized,
-            sealed: 9,
-            open: vec![vial()],
-            note: "From the fridge".to_owned(),
-        }
-    }
-
-    const STORED: &str = concat!(
-        r#"{"id":3,"drug":"Tirzepatide","label":"Batch B","micrograms":30000,"#,
-        r#""form":"Lyophilized","sealed":9,"#,
-        r#""open":[{"id":0,"micrograms":30000,"microlitres":2000,"opened":"2026-08-12"}],"#,
-        r#""note":"From the fridge"}"#
-    );
-
-    /// Version the schema rather than editing `STORED`: this failing means the shape already on
-    /// people's devices has changed.
-    #[test]
-    fn the_stored_shelf_holds_the_shape_it_was_written_in() {
-        let written = serde_json::to_string(&stored::v1::Stock::from(&shelf()))
-            .expect("the shelf serialises");
-        assert_eq!(written, STORED);
-    }
-
-    /// Renaming or removing a variant orphans the vials that chose it; reordering is free.
-    #[test]
-    fn the_drugs_a_vial_can_hold_keep_the_names_they_are_stored_under() {
-        let names: Vec<String> = Drug::ALL
-            .iter()
-            .map(|drug| serde_json::to_string(drug).expect("a drug serialises"))
-            .collect();
-        assert_eq!(
-            names,
-            vec![r#""Semaglutide""#, r#""Tirzepatide""#, r#""Retatrutide""#]
-        );
-    }
-
-    #[test]
-    fn a_shelf_on_the_device_reads_back_as_the_one_that_was_written() {
-        let read: stored::v1::Stock = serde_json::from_str(STORED).expect("it reads");
-        assert_eq!(Stock::from(read), shelf());
-    }
-
-    #[test]
-    fn a_vial_that_came_in_solution_stores_the_volume_printed_on_it() {
-        let premixed = Stock {
-            form: Form::Solution { microlitres: 3000 },
-            ..shelf()
-        };
-        let written = serde_json::to_string(&stored::v1::Stock::from(&premixed))
-            .expect("the shelf serialises");
-        assert!(
-            written.contains(r#""form":{"Solution":{"microlitres":3000}}"#),
-            "{written}"
-        );
-
-        let read: stored::v1::Stock = serde_json::from_str(&written).expect("it reads");
-        assert_eq!(Stock::from(read), premixed);
     }
 
     #[test]

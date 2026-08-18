@@ -1,5 +1,9 @@
 //! Reading and writing the figures the app deals in: strengths in milligrams, volumes in
-//! millilitres, and the draw the two make. Both are carried as whole thousandths.
+//! millilitres, the draw the two make, and the times of day beside them. Strengths and volumes
+//! are carried as whole thousandths.
+
+use chrono::NaiveTime;
+use serde::{Deserialize, Serialize};
 
 const MAX_MICROGRAMS: u32 = 1_000_000;
 
@@ -96,6 +100,55 @@ pub fn format_level(micrograms: f64) -> String {
     } else {
         format!("{mg:.2}")
     }
+}
+
+/// Which face the clock shows: whether a time of day reads `14:00` or `2:00 PM`. Chosen by the
+/// user; the platform's locale is never asked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Clock {
+    #[default]
+    TwentyFourHour,
+    TwelveHour,
+}
+
+impl Clock {
+    pub const ALL: [Clock; 2] = [Clock::TwentyFourHour, Clock::TwelveHour];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Clock::TwentyFourHour => "24-hour",
+            Clock::TwelveHour => "AM / PM",
+        }
+    }
+
+    /// How `chrono` writes a time of day on this face.
+    pub fn face(self) -> &'static str {
+        match self {
+            Clock::TwentyFourHour => "%H:%M",
+            // `%-I` rather than `%I`, so one in the afternoon is `1:00 PM` and not `01:00 PM`.
+            Clock::TwelveHour => "%-I:%M %p",
+        }
+    }
+}
+
+/// Reads a time as a time input reports it. An empty box is a dose whose hour was not recorded,
+/// and reads as `None` along with anything unreadable.
+pub fn parse_time(text: &str) -> Option<NaiveTime> {
+    let text = text.trim();
+    NaiveTime::parse_from_str(text, "%H:%M")
+        .or_else(|_| NaiveTime::parse_from_str(text, "%H:%M:%S"))
+        .ok()
+}
+
+/// A time of day, on the face the user chose.
+pub fn format_time(time: NaiveTime, clock: Clock) -> String {
+    time.format(clock.face()).to_string()
+}
+
+/// A time of day as an `<input type="time">` reports and expects it, which is 24-hour whatever
+/// face the control draws itself with.
+pub fn time_value(time: NaiveTime) -> String {
+    time.format("%H:%M").to_string()
 }
 
 #[cfg(test)]
@@ -244,5 +297,35 @@ mod tests {
     fn a_volume_of_nothing_has_no_concentration_rather_than_an_infinite_one() {
         assert_eq!(concentration(30_000, 0), None);
         assert_eq!(concentration(0, 2000), Some(0.0), "an empty vial is empty");
+    }
+
+    #[test]
+    fn an_hour_survives_being_written_and_read_back_on_either_face() {
+        for (text, twelve) in [
+            ("00:00", "12:00 AM"),
+            ("07:30", "7:30 AM"),
+            ("12:00", "12:00 PM"),
+            ("13:05", "1:05 PM"),
+            ("23:59", "11:59 PM"),
+        ] {
+            let parsed = parse_time(text).expect("a time a clock shows");
+
+            assert_eq!(format_time(parsed, Clock::TwentyFourHour), text);
+            assert_eq!(format_time(parsed, Clock::TwelveHour), twelve);
+            // The form's own box speaks 24-hour whatever face the rest of the app wears.
+            assert_eq!(time_value(parsed), text);
+        }
+    }
+
+    #[test]
+    fn an_empty_or_unreadable_time_is_a_dose_with_no_hour() {
+        for text in ["", "   ", "half past seven", "25:00", "7"] {
+            assert_eq!(parse_time(text), None, "`{text}` is not a time");
+        }
+    }
+
+    #[test]
+    fn a_time_input_reporting_seconds_is_still_read() {
+        assert_eq!(parse_time("07:30:00"), parse_time("07:30"));
     }
 }

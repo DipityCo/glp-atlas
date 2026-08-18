@@ -89,7 +89,7 @@ pub fn InventoryPage() -> Element {
 
         button {
             class: "btn primary block",
-            onclick: move |_| nav.push(SubPage::AddStock),
+            onclick: move |_| nav.push(SubPage::AddStock(None)),
             if shelf.is_empty() { "Add your first vials" } else { "Add vials" }
         }
 
@@ -328,9 +328,9 @@ fn OpenVial(
 }
 
 #[component]
-pub fn AddStockPage() -> Element {
+pub fn AddStockPage(drug: Option<Drug>) -> Element {
     rsx! {
-        StockForm {}
+        StockForm { opening: drug }
     }
 }
 
@@ -346,15 +346,16 @@ pub fn EditStockPage(id: StockId) -> Element {
 }
 
 #[component]
-fn StockForm(id: Option<StockId>) -> Element {
+fn StockForm(id: Option<StockId>, opening: Option<Drug>) -> Element {
     let mut nav = use_context::<Nav>();
     let mut store = use_context::<Store>();
 
     let existing = id.and_then(|id| store.stock_of(id));
 
-    let default_drug = existing
-        .as_ref()
-        .map_or_else(|| store.medication().drug, |entry| entry.drug);
+    let default_drug = existing.as_ref().map_or_else(
+        || opening.or_else(|| store.medication().drug),
+        |entry| entry.drug,
+    );
     let default_label = existing
         .as_ref()
         .map_or_else(String::new, |entry| entry.label.clone());
@@ -576,7 +577,7 @@ mod tests {
             drug,
             micrograms,
             site: crate::store::Site::LeftThigh,
-            from: None,
+            from: Vec::new(),
             note: String::new(),
         }
     }

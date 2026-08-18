@@ -2,7 +2,7 @@
 //! behind both.
 //!
 //! The two are held in signals and written back to the device as one document after every
-//! change, by [`use_store`]. Nothing leaves the device.
+//! change, by [`use_store`], in the shapes [`crate::stored`] freezes. Nothing leaves the device.
 
 use std::cmp::{Ordering, Reverse};
 
@@ -13,14 +13,12 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::formulary::Drug;
-use crate::stock::{self, Stock, StockDraft, StockId, Vial, VialId};
+use crate::stock::{Stock, StockDraft, StockId, Vial, VialId};
+use crate::stored::{Reading, Writing, VERSION};
+use crate::units::Clock;
 
 /// Days between doses when no drug has been chosen.
 const DEFAULT_INTERVAL_DAYS: u32 = 7;
-
-/// Bumped when the stored shape changes. A stored document carrying any other version is left
-/// untouched rather than read, so a newer build's data survives an older one opening it.
-const VERSION: u32 = 1;
 
 /// Reads the stored document, reporting separately that local storage could not be reached at
 /// all. A `WebView` with storage disabled throws rather than returning nothing.
@@ -64,7 +62,7 @@ pub enum Status {
 /// Names a dose for as long as the app runs. Sub-pages hold one of these rather than a position
 /// in the log, so a record deleted from under an open page is a miss and never a different dose.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct DoseId(u64);
+pub struct DoseId(pub(crate) u64);
 
 impl DoseId {
     /// Only the log mints these, so an id always names a dose that was really logged. The tests
@@ -104,6 +102,15 @@ impl Site {
 /// Where a dose with no recorded time is placed. Midday is never more than half a day out.
 pub const ASSUMED_HOUR: u32 = 12;
 
+/// What one vial gave to one dose. Entered as a `DrawnDraft`, which holds the same share as raw
+/// text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Drawn {
+    pub vial: VialId,
+    /// The shares of a dose sum to it only where the whole of it came off the shelf.
+    pub micrograms: u32,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Dose {
     pub id: DoseId,
@@ -122,7 +129,8 @@ pub struct Dose {
     /// tenth of a milligram is a real difference that a binary fraction does not hold exactly.
     pub micrograms: u32,
     pub site: Site,
-    pub from: Option<VialId>,
+    /// In the order they were drawn. Empty for a dose that did not come off the shelf.
+    pub from: Vec<Drawn>,
     pub note: String,
 }
 
@@ -141,7 +149,7 @@ pub struct Draft {
     pub drug: Option<Drug>,
     pub micrograms: u32,
     pub site: Site,
-    pub from: Option<VialId>,
+    pub from: Vec<Drawn>,
     pub note: String,
 }
 
@@ -152,55 +160,6 @@ pub fn assumed_time() -> NaiveTime {
 /// The time of day, where the device is.
 pub fn time_of_day() -> NaiveTime {
     Local::now().time()
-}
-
-/// Which face the clock shows: whether a time of day reads `14:00` or `2:00 PM`. Chosen by the
-/// user; the platform's locale is never asked.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub enum Clock {
-    #[default]
-    TwentyFourHour,
-    TwelveHour,
-}
-
-impl Clock {
-    pub const ALL: [Clock; 2] = [Clock::TwentyFourHour, Clock::TwelveHour];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Clock::TwentyFourHour => "24-hour",
-            Clock::TwelveHour => "AM / PM",
-        }
-    }
-
-    /// How `chrono` writes a time of day on this face.
-    pub fn face(self) -> &'static str {
-        match self {
-            Clock::TwentyFourHour => "%H:%M",
-            // `%-I` rather than `%I`, so one in the afternoon is `1:00 PM` and not `01:00 PM`.
-            Clock::TwelveHour => "%-I:%M %p",
-        }
-    }
-}
-
-/// Reads a time as a time input reports it. An empty box is a dose whose hour was not recorded,
-/// and reads as `None` along with anything unreadable.
-pub fn parse_time(text: &str) -> Option<NaiveTime> {
-    let text = text.trim();
-    NaiveTime::parse_from_str(text, "%H:%M")
-        .or_else(|_| NaiveTime::parse_from_str(text, "%H:%M:%S"))
-        .ok()
-}
-
-/// A time of day, on the face the user chose.
-pub fn format_time(time: NaiveTime, clock: Clock) -> String {
-    time.format(clock.face()).to_string()
-}
-
-/// A time of day as an `<input type="time">` reports and expects it, which is 24-hour whatever
-/// face the control draws itself with.
-pub fn time_value(time: NaiveTime) -> String {
-    time.format("%H:%M").to_string()
 }
 
 /// One rung of a titration plan: a strength, held for a number of weeks.
@@ -260,125 +219,6 @@ pub fn rung(titration: &[TitrationStep], started: NaiveDate, today: NaiveDate) -
         week -= step.weeks;
     }
     None
-}
-
-/// The shape the log takes on the device. Frozen: add a `v2` beside `v1` and convert, rather
-/// than editing `v1`, which is already on people's devices.
-pub mod stored {
-    use super::{Dose, DoseId, Site};
-    use crate::stock::VialId;
-
-    pub mod v1 {
-        use chrono::{NaiveDate, NaiveTime};
-        use serde::{Deserialize, Serialize};
-
-        use crate::formulary::Drug;
-
-        #[derive(Serialize, Deserialize)]
-        pub enum Site {
-            LeftAbdomen,
-            RightAbdomen,
-            LeftThigh,
-            RightThigh,
-        }
-
-        /// Fields added within the version default rather than fail, so a dose written before
-        /// them still reads.
-        #[derive(Serialize, Deserialize)]
-        pub struct Dose {
-            pub id: u64,
-            pub taken: NaiveDate,
-            #[serde(default)]
-            pub time: Option<NaiveTime>,
-            /// [`Drug`] itself, not a copy: the formulary already treats its variant names as
-            /// names on the device.
-            #[serde(default)]
-            pub drug: Option<Drug>,
-            pub micrograms: u32,
-            pub site: Site,
-            /// The vial it was drawn from, by the id the shelf stores that vial under.
-            #[serde(default)]
-            pub from: Option<u64>,
-            pub note: String,
-        }
-    }
-
-    impl From<Site> for v1::Site {
-        fn from(site: Site) -> Self {
-            match site {
-                Site::LeftAbdomen => v1::Site::LeftAbdomen,
-                Site::RightAbdomen => v1::Site::RightAbdomen,
-                Site::LeftThigh => v1::Site::LeftThigh,
-                Site::RightThigh => v1::Site::RightThigh,
-            }
-        }
-    }
-
-    impl From<v1::Site> for Site {
-        fn from(site: v1::Site) -> Self {
-            match site {
-                v1::Site::LeftAbdomen => Site::LeftAbdomen,
-                v1::Site::RightAbdomen => Site::RightAbdomen,
-                v1::Site::LeftThigh => Site::LeftThigh,
-                v1::Site::RightThigh => Site::RightThigh,
-            }
-        }
-    }
-
-    impl From<&Dose> for v1::Dose {
-        fn from(dose: &Dose) -> Self {
-            v1::Dose {
-                id: dose.id.0,
-                taken: dose.taken,
-                time: dose.time,
-                drug: dose.drug,
-                micrograms: dose.micrograms,
-                site: dose.site.into(),
-                from: dose.from.map(|vial| vial.0),
-                note: dose.note.clone(),
-            }
-        }
-    }
-
-    impl From<v1::Dose> for Dose {
-        fn from(dose: v1::Dose) -> Self {
-            Dose {
-                id: DoseId(dose.id),
-                taken: dose.taken,
-                time: dose.time,
-                drug: dose.drug,
-                micrograms: dose.micrograms,
-                site: dose.site.into(),
-                from: dose.from.map(VialId),
-                note: dose.note,
-            }
-        }
-    }
-}
-
-/// The stored document on the way out.
-#[derive(Serialize)]
-struct Writing<'a> {
-    version: u32,
-    doses: Vec<stored::v1::Dose>,
-    stock: Vec<stock::stored::v1::Stock>,
-    medication: &'a Medication,
-    clock: Clock,
-}
-
-/// The stored document on the way in. Records added within a version default rather than fail,
-/// so a document written before them still reads.
-#[derive(Deserialize)]
-struct Reading {
-    version: u32,
-    #[serde(default)]
-    doses: Vec<stored::v1::Dose>,
-    #[serde(default)]
-    stock: Vec<stock::stored::v1::Stock>,
-    #[serde(default)]
-    medication: Medication,
-    #[serde(default)]
-    clock: Clock,
 }
 
 /// What [`READ`] reports back.
@@ -664,9 +504,7 @@ impl Store {
 
     fn release(&mut self, vials: &[VialId]) {
         for dose in self.doses.write().iter_mut() {
-            if dose.from.is_some_and(|from| vials.contains(&from)) {
-                dose.from = None;
-            }
+            dose.from.retain(|drawn| !vials.contains(&drawn.vial));
         }
     }
 
@@ -690,8 +528,9 @@ impl Store {
             .doses
             .read()
             .iter()
-            .filter(|dose| dose.from == Some(vial.id))
-            .fold(0_u32, |sum, dose| sum.saturating_add(dose.micrograms));
+            .flat_map(|dose| dose.from.iter())
+            .filter(|drawn| drawn.vial == vial.id)
+            .fold(0_u32, |sum, drawn| sum.saturating_add(drawn.micrograms));
         vial.micrograms.saturating_sub(drawn)
     }
 
@@ -864,7 +703,7 @@ mod tests {
             drug: None,
             micrograms,
             site,
-            from: None,
+            from: Vec::new(),
             note: String::new(),
         }
     }
@@ -982,7 +821,7 @@ mod tests {
                 drug: None,
                 micrograms: 2500,
                 site: Site::LeftThigh,
-                from: None,
+                from: Vec::new(),
                 note: String::new(),
             });
 
@@ -1013,7 +852,7 @@ mod tests {
                 drug: None,
                 micrograms: 2500,
                 site: Site::LeftThigh,
-                from: None,
+                from: Vec::new(),
                 note: String::new(),
             });
             let evening = store.add(Draft {
@@ -1022,7 +861,7 @@ mod tests {
                 drug: None,
                 micrograms: 2500,
                 site: Site::RightThigh,
-                from: None,
+                from: Vec::new(),
                 note: String::new(),
             });
 
@@ -1031,19 +870,7 @@ mod tests {
         });
     }
 
-    #[test]
-    fn a_stored_dose_without_an_hour_reads_back_as_one_that_never_had_it() {
-        let payload = r#"{"version":1,"doses":[
-            {"id":0,"taken":"2026-08-06","micrograms":2500,"site":"LeftThigh","note":""}
-        ]}"#;
-        let read: Reading = serde_json::from_str(payload).expect("it still reads");
-        let doses: Vec<Dose> = read.doses.into_iter().map(Dose::from).collect();
-
-        assert_eq!(doses.len(), 1);
-        assert_eq!(doses[0].time, None);
-        assert_eq!(doses[0].hour(), assumed_time());
-    }
-
+    /// The dose in `STORED_DOCUMENT`, drawn wholly from the vial on the shelf in `shelved`.
     fn logged() -> Dose {
         Dose {
             id: DoseId::new(3),
@@ -1052,79 +879,12 @@ mod tests {
             drug: Some(Drug::Tirzepatide),
             micrograms: 2500,
             site: Site::LeftThigh,
-            from: Some(VialId::new(4)),
+            from: vec![Drawn {
+                vial: VialId::new(4),
+                micrograms: 2500,
+            }],
             note: "From the fridge".to_owned(),
         }
-    }
-
-    const STORED: &str = concat!(
-        r#"{"id":3,"taken":"2026-08-06","time":"07:30:00","drug":"Tirzepatide","#,
-        r#""micrograms":2500,"site":"LeftThigh","from":4,"note":"From the fridge"}"#
-    );
-
-    /// Version the schema rather than editing `STORED`: this failing means the shape already on
-    /// people's devices has changed.
-    #[test]
-    fn the_stored_dose_holds_the_shape_it_was_written_in() {
-        let written =
-            serde_json::to_string(&stored::v1::Dose::from(&logged())).expect("the dose serialises");
-        assert_eq!(written, STORED);
-    }
-
-    #[test]
-    fn a_dose_on_the_device_reads_back_as_the_one_that_was_written() {
-        let read: stored::v1::Dose = serde_json::from_str(STORED).expect("it reads");
-        assert_eq!(Dose::from(read), logged());
-    }
-
-    /// Renaming or removing a variant orphans the doses that chose it; reordering is free.
-    #[test]
-    fn the_sites_a_dose_can_name_keep_the_names_they_are_stored_under() {
-        let names: Vec<String> = Site::ALL
-            .into_iter()
-            .map(|site| {
-                serde_json::to_string(&stored::v1::Site::from(site)).expect("a site serialises")
-            })
-            .collect();
-        assert_eq!(
-            names,
-            vec![
-                r#""LeftAbdomen""#,
-                r#""RightAbdomen""#,
-                r#""LeftThigh""#,
-                r#""RightThigh""#
-            ]
-        );
-    }
-
-    #[test]
-    fn an_hour_survives_being_written_and_read_back_on_either_face() {
-        for (text, twelve) in [
-            ("00:00", "12:00 AM"),
-            ("07:30", "7:30 AM"),
-            ("12:00", "12:00 PM"),
-            ("13:05", "1:05 PM"),
-            ("23:59", "11:59 PM"),
-        ] {
-            let parsed = parse_time(text).expect("a time a clock shows");
-
-            assert_eq!(format_time(parsed, Clock::TwentyFourHour), text);
-            assert_eq!(format_time(parsed, Clock::TwelveHour), twelve);
-            // The form's own box speaks 24-hour whatever face the rest of the app wears.
-            assert_eq!(time_value(parsed), text);
-        }
-    }
-
-    #[test]
-    fn an_empty_or_unreadable_time_is_a_dose_with_no_hour() {
-        for text in ["", "   ", "half past seven", "25:00", "7"] {
-            assert_eq!(parse_time(text), None, "`{text}` is not a time");
-        }
-    }
-
-    #[test]
-    fn a_time_input_reporting_seconds_is_still_read() {
-        assert_eq!(parse_time("07:30:00"), Some(time("07:30")));
     }
 
     #[test]
@@ -1202,7 +962,7 @@ mod tests {
                 drug: None,
                 micrograms: 2500,
                 site: Site::LeftAbdomen,
-                from: None,
+                from: Vec::new(),
                 note: "Quotes \" and a\nnewline".to_owned(),
             });
             store.add(draft("2026-07-30", 1700, Site::RightThigh));
@@ -1269,7 +1029,8 @@ mod tests {
     /// order they are written in, which no single record's frozen shape can.
     const STORED_DOCUMENT: &str = concat!(
         r#"{"version":1,"doses":[{"id":3,"taken":"2026-08-06","time":"07:30:00","#,
-        r#""drug":"Tirzepatide","micrograms":2500,"site":"LeftThigh","from":4,"#,
+        r#""drug":"Tirzepatide","micrograms":2500,"site":"LeftThigh","#,
+        r#""from":[{"vial":4,"micrograms":2500}],"#,
         r#""note":"From the fridge"}],"#,
         r#""stock":[{"id":1,"drug":"Tirzepatide","label":"","micrograms":30000,"#,
         r#""form":"Lyophilized","sealed":9,"#,
@@ -1292,8 +1053,8 @@ mod tests {
         }
     }
 
-    /// Version the schema rather than editing `STORED_DOCUMENT`: this failing means the document
-    /// already on people's devices has changed, whichever record moved.
+    /// This failing means the document written to the device has changed, whichever record moved.
+    /// Nothing is released, so that is allowed; read the diff and make sure it was meant.
     #[test]
     fn the_stored_document_holds_the_shape_it_was_written_in() {
         let written = serde_json::to_string(&Writing {
@@ -1338,27 +1099,6 @@ mod tests {
                 "a fresh dose cannot collide with a stored one"
             );
         });
-    }
-
-    #[test]
-    fn a_document_missing_a_record_reads_with_that_record_empty() {
-        let payload = r#"{"version":1,"doses":[]}"#;
-        let read: Reading = serde_json::from_str(payload).expect("it still reads");
-
-        assert_eq!(read.medication, Medication::default());
-        assert!(read.doses.is_empty());
-        assert_eq!(
-            read.clock,
-            Clock::TwentyFourHour,
-            "a document written before the setting reads as the app behaved then"
-        );
-    }
-
-    #[test]
-    fn a_stored_log_from_another_version_is_not_read() {
-        let payload = r#"{"version":99,"doses":[]}"#;
-        let read: Reading = serde_json::from_str(payload).expect("it is still json");
-        assert_ne!(read.version, VERSION);
     }
 
     #[test]
@@ -1510,7 +1250,18 @@ mod tests {
 
     fn drawn(taken: &str, micrograms: u32, vial: VialId) -> Draft {
         Draft {
-            from: Some(vial),
+            from: vec![Drawn { vial, micrograms }],
+            ..draft(taken, micrograms, Site::LeftThigh)
+        }
+    }
+
+    fn split(taken: &str, shares: &[(VialId, u32)]) -> Draft {
+        let micrograms = shares.iter().map(|(_, share)| share).sum();
+        Draft {
+            from: shares
+                .iter()
+                .map(|&(vial, micrograms)| Drawn { vial, micrograms })
+                .collect(),
             ..draft(taken, micrograms, Site::LeftThigh)
         }
     }
@@ -1638,6 +1389,87 @@ mod tests {
     }
 
     #[test]
+    fn a_dose_split_across_two_vials_falls_out_of_each_by_its_own_share() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 2));
+            let first = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            let second = store
+                .open_vial(id, 2000, date("2026-08-19"))
+                .expect("mixed");
+            store.add(drawn("2026-08-13", 28_000, first));
+
+            let dose = store.add(split("2026-08-20", &[(first, 2000), (second, 500)]));
+
+            let entry = only(store);
+            assert_eq!(store.remaining(&entry.open[0]), 0, "the first is emptied");
+            assert_eq!(store.remaining(&entry.open[1]), 29_500);
+            assert_eq!(
+                store.get(dose).map(|dose| dose.micrograms),
+                Some(2500),
+                "and the dose is the whole of what was given"
+            );
+        });
+    }
+
+    #[test]
+    fn discarding_one_vial_of_a_split_dose_leaves_the_other_share_standing() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 2));
+            let first = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            let second = store
+                .open_vial(id, 2000, date("2026-08-19"))
+                .expect("mixed");
+            let dose = store.add(split("2026-08-20", &[(first, 2000), (second, 500)]));
+
+            store.discard_vial(id, first);
+
+            let logged = store.get(dose).expect("the dose is still logged");
+            assert_eq!(logged.micrograms, 2500, "exactly as it was given");
+            assert_eq!(
+                logged.from,
+                vec![Drawn {
+                    vial: second,
+                    micrograms: 500
+                }],
+                "naming only the vial still on the shelf"
+            );
+            assert_eq!(store.remaining(&only(store).open[0]), 29_500);
+        });
+    }
+
+    #[test]
+    fn a_split_dose_survives_being_written_and_read_back() {
+        store(|mut store| {
+            let id = store.add_stock(vials(30_000, 2));
+            let first = store
+                .open_vial(id, 2000, date("2026-08-12"))
+                .expect("mixed");
+            let second = store
+                .open_vial(id, 2000, date("2026-08-19"))
+                .expect("mixed");
+            store.add(split("2026-08-20", &[(first, 2000), (second, 500)]));
+            let doses = store.all();
+
+            let payload = serde_json::to_string(&Writing {
+                version: VERSION,
+                doses: doses.iter().map(Into::into).collect(),
+                stock: store.stock().iter().map(Into::into).collect(),
+                medication: &store.medication(),
+                clock: store.clock(),
+            })
+            .expect("the document serialises");
+            let read: Reading = serde_json::from_str(&payload).expect("and reads back");
+
+            let logged: Vec<Dose> = read.doses.into_iter().map(Dose::from).collect();
+            assert_eq!(logged, doses);
+        });
+    }
+
+    #[test]
     fn deleting_a_dose_gives_the_drug_back_and_editing_one_reckons_it_afresh() {
         store(|mut store| {
             let id = store.add_stock(vials(30_000, 1));
@@ -1691,7 +1523,7 @@ mod tests {
             assert!(only(store).open.is_empty());
             let logged = store.get(dose).expect("the dose is still logged");
             assert_eq!(logged.micrograms, 2500, "exactly as it was given");
-            assert_eq!(logged.from, None, "and pointing at no vial");
+            assert!(logged.from.is_empty(), "and pointing at no vial");
             assert_eq!(store.vial(vial), None);
         });
     }
@@ -1715,7 +1547,13 @@ mod tests {
                 27_500,
                 "and still counts the dose drawn from it"
             );
-            assert_eq!(store.get(dose).and_then(|dose| dose.from), Some(vial));
+            assert_eq!(
+                store.get(dose).map(|dose| dose.from),
+                Some(vec![Drawn {
+                    vial,
+                    micrograms: 2500
+                }])
+            );
         });
     }
 
@@ -1732,7 +1570,7 @@ mod tests {
 
             assert!(store.stock().is_empty());
             assert_eq!(store.supply(), (0, 0));
-            assert_eq!(store.get(dose).and_then(|dose| dose.from), None);
+            assert_eq!(store.get(dose).map(|dose| dose.from), Some(Vec::new()));
         });
     }
 
@@ -1769,18 +1607,6 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_document_written_before_the_inventory_reads_with_an_empty_shelf() {
-        let payload = r#"{"version":1,"doses":[
-            {"id":0,"taken":"2026-08-06","micrograms":2500,"site":"LeftThigh","note":""}
-        ]}"#;
-        let read: Reading = serde_json::from_str(payload).expect("it still reads");
-        let doses: Vec<Dose> = read.doses.into_iter().map(Dose::from).collect();
-
-        assert!(read.stock.is_empty());
-        assert_eq!(doses[0].from, None, "and no dose came out of a vial");
-    }
-
-    #[test]
     fn the_shelf_and_the_vial_a_dose_came_from_survive_being_written_and_read_back() {
         store(|mut store| {
             let id = store.add_stock(StockDraft {
@@ -1808,7 +1634,13 @@ mod tests {
             let logged: Vec<Dose> = read.doses.into_iter().map(Dose::from).collect();
             assert_eq!(back, shelf);
             assert_eq!(logged, doses);
-            assert_eq!(logged[0].from, Some(vial));
+            assert_eq!(
+                logged[0].from,
+                vec![Drawn {
+                    vial,
+                    micrograms: 2500
+                }]
+            );
         });
     }
 
